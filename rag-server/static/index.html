@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Multimodal RAG Minimal Panel</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 840px; margin: 30px auto; padding: 0 16px; line-height: 1.5; color: #1e293b; background: #f8fafc; }
+    h2 { margin-bottom: 20px; font-weight: 700; color: #0f172a; }
+    fieldset { margin-bottom: 24px; padding: 20px; border: 1px solid #cbd5e1; border-radius: 8px; background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+    legend { font-weight: 600; padding: 0 8px; color: #334155; }
+    .field { margin-bottom: 12px; display: flex; flex-direction: column; gap: 4px; }
+    label { font-size: 13px; font-weight: 600; color: #475569; }
+    input[type="text"], textarea { width: 100%; padding: 8px 12px; box-sizing: border-box; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px; }
+    textarea { height: 60px; resize: vertical; }
+    button { padding: 8px 16px; cursor: pointer; font-weight: 600; background: #0284c7; color: #fff; border: none; border-radius: 6px; font-size: 14px; transition: background 0.15s; }
+    button:hover { background: #0369a1; }
+    .btn-secondary { background: #64748b; font-size: 13px; padding: 6px 12px; }
+    .btn-secondary:hover { background: #475569; }
+    .btn-danger { background: #ef4444; font-size: 12px; padding: 4px 10px; border-radius: 4px; }
+    .btn-danger:hover { background: #dc2626; }
+    .btn-clear { background: #e2e8f0; color: #475569; border: 1px solid #cbd5e1; font-size: 12px; padding: 4px 10px; border-radius: 4px; font-weight: 600; cursor: pointer; }
+    .btn-clear:hover { background: #cbd5e1; color: #1e293b; }
+    .file-row { display: flex; align-items: center; gap: 10px; }
+    .answer-box { margin-top: 14px; padding: 14px; border-radius: 6px; background: #f1f5f9; border-left: 4px solid #0284c7; font-size: 15px; white-space: pre-wrap; word-break: break-word; }
+    .tag-container { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+    .source-tag { background: #e0f2fe; color: #0369a1; padding: 3px 8px; border-radius: 4px; font-size: 12px; font-family: monospace; font-weight: 600; }
+    .item-card { margin-top: 8px; padding: 12px; border: 1px solid #e2e8f0; border-radius: 6px; background: #f8fafc; }
+    .item-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+    .modality-badge { display: inline-block; padding: 2px 6px; font-size: 11px; font-weight: 700; border-radius: 4px; background: #e2e8f0; color: #334155; text-transform: uppercase; }
+    .score-badge { float: right; font-weight: 700; color: #16a34a; font-family: monospace; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h2>Multimodal RAG Server — Minimal Control Panel</h2>
+  <fieldset>
+    <legend>1. Index Document (POST /api/v1/index)</legend>
+    <div class="field"><label>ID</label><input type="text" id="idx-id" value="doc_test_1"></div>
+    <div class="field"><label>Title</label><input type="text" id="idx-title" value="Rust Architecture"></div>
+    <div class="field"><label>Text</label><textarea id="idx-text">Rust delivers fearless concurrency and memory safety without a garbage collector.</textarea></div>
+    <div class="field">
+      <label>Image (Optional, max 20MB, JPEG/PNG/WebP/GIF)</label>
+      <div class="file-row">
+        <input type="file" id="idx-file" accept="image/jpeg,image/png,image/webp,image/gif" onchange="handleFileChange('idx-file', 'idx-file-clear')">
+        <button type="button" id="idx-file-clear" class="btn-clear" style="display:none;" onclick="clearFileInput('idx-file', 'idx-file-clear')">✕ Clear Image</button>
+      </div>
+    </div>
+    <button onclick="submitIndex()">Index Document</button>
+    <div id="idx-out" class="answer-box" style="display:none;"></div>
+  </fieldset>
+  <fieldset>
+    <legend>2. Vector Search (POST /api/v1/search)</legend>
+    <div class="field"><label>Query Text</label><input type="text" id="srch-query" placeholder="e.g. memory safety"></div>
+    <div class="field">
+      <label>Query Image (Optional, max 20MB, JPEG/PNG/WebP/GIF)</label>
+      <div class="file-row">
+        <input type="file" id="srch-file" accept="image/jpeg,image/png,image/webp,image/gif" onchange="handleFileChange('srch-file', 'srch-file-clear')">
+        <button type="button" id="srch-file-clear" class="btn-clear" style="display:none;" onclick="clearFileInput('srch-file', 'srch-file-clear')">✕ Clear Image</button>
+      </div>
+    </div>
+    <button onclick="submitSearch()">Search Vectors</button>
+    <div id="srch-out" style="display:none; margin-top: 12px;"></div>
+  </fieldset>
+  <fieldset>
+    <legend>3. RAG Query (POST /api/v1/rag)</legend>
+    <div class="field"><label>Question (Required)</label><input type="text" id="rag-query" placeholder="Ask a question based on knowledge base..."></div>
+    <div class="field">
+      <label>Query Image (Optional, max 20MB, JPEG/PNG/WebP/GIF)</label>
+      <div class="file-row">
+        <input type="file" id="rag-file" accept="image/jpeg,image/png,image/webp,image/gif" onchange="handleFileChange('rag-file', 'rag-file-clear')">
+        <button type="button" id="rag-file-clear" class="btn-clear" style="display:none;" onclick="clearFileInput('rag-file', 'rag-file-clear')">✕ Clear Image</button>
+      </div>
+    </div>
+    <button onclick="submitRag()">Ask Pipeline</button>
+    <div id="rag-container" style="display:none;">
+      <div id="rag-text" class="answer-box"></div>
+      <div id="rag-sources" class="tag-container"></div>
+    </div>
+  </fieldset>
+  <fieldset>
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+      <legend style="margin-bottom: 0;">4. Knowledge Base Explorer (GET /api/v1/documents)</legend>
+      <button type="button" class="btn-secondary" onclick="loadDocuments()">Refresh List</button>
+    </div>
+    <div id="docs-count" style="font-size: 13px; color: #64748b; margin-bottom: 8px;">Total documents: 0</div>
+    <div id="docs-list">Loading documents...</div>
+  </fieldset>
+  <script>
+    const MAX_CLIENT_FILE_SIZE = 20 * 1024 * 1024; // 20 MB
+    const SUPPORTED_MIME_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+    function handleFileChange(inputId, clearBtnId) {
+      const input = document.getElementById(inputId);
+      const btn = document.getElementById(clearBtnId);
+      if (btn) {
+        btn.style.display = (input && input.files && input.files.length > 0) ? 'inline-block' : 'none';
+      }
+    }
+    function clearFileInput(inputId, clearBtnId) {
+      const input = document.getElementById(inputId);
+      if (input) {
+        input.value = '';
+      }
+      const btn = document.getElementById(clearBtnId);
+      if (btn) {
+        btn.style.display = 'none';
+      }
+    }
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+    function formatErrorMessage(data, fallback = 'Request failed') {
+      if (!data) return fallback;
+      if (typeof data.error === 'string') return data.error;
+      if (data.error && typeof data.error.message === 'string') return data.error.message;
+      if (typeof data.message === 'string') return data.message;
+      return JSON.stringify(data);
+    }
+    function resolveMimeType(file) {
+      if (file.type && SUPPORTED_MIME_TYPES.includes(file.type)) {
+        return file.type;
+      }
+      const ext = file.name.split('.').pop()?.toLowerCase();
+      switch (ext) {
+        case 'jpg':
+        case 'jpeg':
+          return 'image/jpeg';
+        case 'png':
+          return 'image/png';
+        case 'webp':
+          return 'image/webp';
+        case 'gif':
+          return 'image/gif';
+        default:
+          return null;
+      }
+    }
+    async function parseResponse(res) {
+      const contentType = res.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        try {
+          return await res.json();
+        } catch (_) {
+          return { error: { message: "Failed to parse JSON response body" } };
+        }
+      }
+      const rawText = await res.text();
+      return { error: { message: `HTTP ${res.status}: ${rawText || res.statusText}` } };
+    }
+    function fileToBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+    async function loadDocuments() {
+      const listEl = document.getElementById('docs-list');
+      const countEl = document.getElementById('docs-count');
+      try {
+        const res = await fetch('/api/v1/documents');
+        const data = await parseResponse(res);
+        if (!res.ok) {
+          listEl.innerHTML = `<div class="answer-box">Error loading documents: ${escapeHtml(formatErrorMessage(data))}</div>`;
+          return;
+        }
+        const docs = data.documents || [];
+        countEl.textContent = `Total documents: ${docs.length}`;
+        if (docs.length === 0) {
+          listEl.innerHTML = '<div style="font-size: 14px; color: #64748b; padding: 8px 0;">No documents in vector store.</div>';
+          return;
+        }
+        listEl.innerHTML = docs.map(doc => {
+          const title = doc.payload?.title ? `<b>${escapeHtml(doc.payload.title)}</b> — ` : '';
+          const snippet = escapeHtml(doc.payload?.text || '');
+          const mod = escapeHtml(typeof doc.modality === 'string' ? doc.modality : (doc.modality?.type || 'Text'));
+          return `
+            <div class="item-card">
+              <div class="item-header">
+                <div>
+                  <span class="modality-badge">${mod}</span>
+                  <span style="font-weight: 600; margin-left: 6px;">${escapeHtml(doc.id)}</span>
+                </div>
+                <button class="btn-danger" onclick="deleteDocument('${escapeHtml(doc.id)}')">Delete</button>
+              </div>
+              <div style="font-size: 13px; color: #475569; margin-top: 4px;">
+                ${title}${snippet}
+              </div>
+            </div>
+          `;
+        }).join('');
+      } catch (e) {
+        listEl.innerHTML = `<div class="answer-box">Network error: ${escapeHtml(String(e))}</div>`;
+      }
+    }
+    async function deleteDocument(id) {
+      if (!confirm(`Are you sure you want to delete document '${id}'?`)) {
+        return;
+      }
+      try {
+        const res = await fetch(`/api/v1/documents/${encodeURIComponent(id)}`, {
+          method: 'DELETE'
+        });
+        const data = await parseResponse(res);
+        if (!res.ok) {
+          alert("Failed to delete: " + formatErrorMessage(data));
+          return;
+        }
+        await loadDocuments();
+      } catch (e) {
+        alert("Network error: " + e);
+      }
+    }
+    async function submitIndex() {
+      const out = document.getElementById('idx-out');
+      out.style.display = 'block';
+      const fileInput = document.getElementById('idx-file');
+      const file = fileInput.files[0];
+      const id = document.getElementById('idx-id').value.trim();
+      const title = document.getElementById('idx-title').value.trim();
+      const textVal = document.getElementById('idx-text').value.trim();
+      let mimeType = null;
+      if (!id) {
+        out.textContent = "Error: Document ID cannot be empty.";
+        return;
+      }
+      if (!textVal && !file) {
+        out.textContent = "Error: Please provide document text or attach an image.";
+        return;
+      }
+      if (file) {
+        mimeType = resolveMimeType(file);
+        if (!mimeType) {
+          out.textContent = `Error: Unsupported image format '${file.name}'. Allowed formats: JPEG, PNG, WebP, GIF.`;
+          return;
+        }
+        if (file.size > MAX_CLIENT_FILE_SIZE) {
+          out.textContent = "Error: File size exceeds client limit (20 MB).";
+          return;
+        }
+      }
+      out.textContent = "Indexing...";
+      const payload = { id };
+      if (title) payload.title = title;
+      if (textVal) payload.text = textVal;
+
+      if (file && mimeType) {
+        payload.image = { type: "Raw", data: { base64: await fileToBase64(file), mime_type: mimeType } };
+      }
+      try {
+        const res = await fetch('/api/v1/index', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload)
+        });
+        const data = await parseResponse(res);
+        if (res.ok) {
+          out.textContent = `Successfully indexed document: ${data.id || payload.id}`;
+          clearFileInput('idx-file', 'idx-file-clear');
+          await loadDocuments();
+        } else {
+          out.textContent = `Error: ${formatErrorMessage(data)}`;
+        }
+      } catch (e) {
+        out.textContent = "Network error: " + e;
+      }
+    }
+    async function submitSearch() {
+      const out = document.getElementById('srch-out');
+      const q = document.getElementById('srch-query').value.trim();
+      const file = document.getElementById('srch-file').files[0];
+      let mimeType = null;
+      if (!q && !file) {
+        out.style.display = 'block';
+        out.innerHTML = '<div class="answer-box">Please provide either a text query or an image.</div>';
+        return;
+      }
+      if (file) {
+        mimeType = resolveMimeType(file);
+        if (!mimeType) {
+          out.style.display = 'block';
+          out.innerHTML = `<div class="answer-box">Error: Unsupported image format '${escapeHtml(file.name)}'. Allowed formats: JPEG, PNG, WebP, GIF.</div>`;
+          return;
+        }
+        if (file.size > MAX_CLIENT_FILE_SIZE) {
+          out.style.display = 'block';
+          out.innerHTML = '<div class="answer-box">Error: File size exceeds client limit (20 MB).</div>';
+          return;
+        }
+      }
+      out.style.display = 'block';
+      out.innerHTML = '<div class="answer-box">Searching...</div>';
+      const payload = { top_k: 5 };
+      if (q) payload.query = q;
+      if (file && mimeType) {
+        payload.image = { type: "Raw", data: { base64: await fileToBase64(file), mime_type: mimeType } };
+      }
+      try {
+        const res = await fetch('/api/v1/search', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload)
+        });
+        const data = await parseResponse(res);
+        if (!res.ok) {
+          out.innerHTML = `<div class="answer-box">Error: ${escapeHtml(formatErrorMessage(data, 'Search failed'))}</div>`;
+          return;
+        }
+        if (!data.results || data.results.length === 0) {
+          out.innerHTML = '<div class="answer-box">No matches found.</div>';
+          return;
+        }
+        out.innerHTML = data.results.map(r => `
+          <div class="item-card">
+            <span class="score-badge">Score: ${(r.score * 100).toFixed(1)}%</span>
+            <b>${escapeHtml(r.id)}</b> [${escapeHtml(r.modality)}]
+            <div style="font-size: 13px; color: #475569; margin-top: 4px;">${escapeHtml(r.payload?.text || r.payload?.title || '')}</div>
+          </div>
+        `).join('');
+      } catch (e) {
+        out.innerHTML = `<div class="answer-box">Network error: ${escapeHtml(String(e))}</div>`;
+      }
+    }
+    async function submitRag() {
+      const box = document.getElementById('rag-container');
+      const text = document.getElementById('rag-text');
+      const sources = document.getElementById('rag-sources');
+      const q = document.getElementById('rag-query').value.trim();
+      const file = document.getElementById('rag-file').files[0];
+      let mimeType = null;
+      if (!q) {
+        box.style.display = 'block';
+        text.textContent = "Please enter a question. (A text query is required for RAG reasoning).";
+        sources.innerHTML = "";
+        return;
+      }
+      if (file) {
+        mimeType = resolveMimeType(file);
+        if (!mimeType) {
+          box.style.display = 'block';
+          text.textContent = `Error: Unsupported image format '${file.name}'. Allowed formats: JPEG, PNG, WebP, GIF.`;
+          sources.innerHTML = "";
+          return;
+        }
+        if (file.size > MAX_CLIENT_FILE_SIZE) {
+          box.style.display = 'block';
+          text.textContent = "Error: File size exceeds client limit (20 MB).";
+          sources.innerHTML = "";
+          return;
+        }
+      }
+      box.style.display = 'block';
+      text.textContent = "Generating answer from knowledge base...";
+      sources.innerHTML = "";
+      const payload = {
+        query: q,
+        top_k: 3
+      };
+      if (file && mimeType) {
+        payload.image = { type: "Raw", data: { base64: await fileToBase64(file), mime_type: mimeType } };
+      }
+      try {
+        const res = await fetch('/api/v1/rag', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload)
+        });
+        const data = await parseResponse(res);
+        if (!res.ok) {
+          text.textContent = "Error: " + formatErrorMessage(data, "Failed to process query");
+          return;
+        }
+        text.textContent = data.answer || data.response || "No text answer generated.";
+        if (data.sources && data.sources.length > 0) {
+          sources.innerHTML = data.sources.map(s => `
+            <span class="source-tag"># ${escapeHtml(s.id)} (${(s.score * 100).toFixed(0)}%)</span>
+          `).join('');
+        }
+      } catch (e) {
+        text.textContent = "Network error: " + e;
+      }
+    }
+    window.addEventListener('DOMContentLoaded', loadDocuments);
+  </script>
+</body>
+</html>
