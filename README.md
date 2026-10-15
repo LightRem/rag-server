@@ -9,15 +9,68 @@ A production-ready, asynchronous Multimodal Vector Search and Retrieval-Augmente
 
 ---
 
-<img width="1132" height="553" alt="image" src="https://github.com/user-attachments/assets/5bc77c6e-f7f3-438b-80c6-e3be4a30dff6" />
+<img width="1132" height="553" alt="image" src="https://github.com/user-attachments/assets/bb795330-e83d-4228-8549-7ae0d75ded60" />
 
 <p align="center">
-  <img src="assets/dashboard.png" alt="Control Panel Dashboard Overview" width="100%" />
+  <img src="assets/control_panel_overview.png" alt="Multimodal RAG Server Minimal Control Panel" width="100%" />
 </p>
 
 ---
 
-## Architecture Overview
+## Interactive Web Console & Usage Workflow
+
+The server comes with an embedded, zero-dependency web control panel accessible at:
+```text
+[http://127.0.0.1:8080/](http://127.0.0.1:8080/)
+```
+
+The interface is structured into four sequential modules covering the entire multimodal lifecycle:
+
+<img width="1052" height="297" alt="image" src="https://github.com/user-attachments/assets/5705f212-11a0-4a97-adc0-5d126712dd08" />
+
+
+<p align="center">
+  <img src="assets/indexing_and_search.png" alt="Indexing and Vector Search" width="100%" />
+</p>
+
+### 1. Document Indexing (`POST /api/v1/index`)
+Populate the multimodal knowledge base with heterogeneous content:
+- **Identifier (`ID`)**: Unique string key for the document (e.g., `doc_cat_habits`, `doc_test_1`).
+- **Title & Text Payload**: Human-readable title and descriptive body text.
+- **Image Input (Optional, up to 20MB)**: Attach local images in JPEG, PNG, WebP, or GIF formats.
+- **Automatic Modality Detection**: 
+  - Providing only text tags the record as `TEXT`.
+  - Providing only an image tags it as `IMAGE`.
+  - Providing both registers a unified `MULTIMODAL` vector point across both HNSW sub-graphs.
+
+### 2. Vector Similarity Search (`POST /api/v1/search`)
+Query the vector space across modalities with calibrated scoring:
+- **Query Inputs**: Search using plain text query strings, reference image uploads, or both simultaneously.
+- **Calibrated Scoring**: Outputs ranked results with calibrated similarity metrics ($[0.0, 1.0]$ spectrum), mitigating CLIP's raw anisotropic noise floor.
+- **Modality Badges**: Identifies which modality triggered the match (`Text`, `Image`, or fused cross-modal match).
+
+<img width="1072" height="332" alt="image" src="https://github.com/user-attachments/assets/df28dc9d-0e62-4aea-a4df-2c2bcfc86dd4" />
+<img width="1021" height="802" alt="image" src="https://github.com/user-attachments/assets/5e7d72b2-0faf-4857-b2d0-508bf3825189" />
+
+<p align="center">
+  <img src="assets/rag_and_explorer.png" alt="RAG Pipeline and Knowledge Base Explorer" width="100%" />
+</p>
+
+### 3. RAG Query Pipeline (`POST /api/v1/rag`)
+Ask natural-language questions grounded strictly against your indexed knowledge:
+- **Question Formulation**: Submit an explicit user question.
+- **Visual Context (Optional)**: Provide a query image to guide cross-modal context retrieval.
+- **Strict Verification & Citations**: The pipeline fetches top-$k$ nearest context passages, injects budget-capped evidence into the prompt, and queries the configured LLM. Responses enforce inline source citations (`[Source ID: <id>]`), preventing hallucinations.
+
+### 4. Knowledge Base Explorer (`GET /api/v1/documents`)
+Inspect and manage the active state of the in-memory vector store:
+- **Live Inventory**: View total document counts and inspect stored records with explicit modality tags (`TEXT`, `IMAGE`, `MULTIMODAL`).
+- **Real-Time Deletion**: The `Delete` button removes points using an atomic `swap_remove` strategy and reconstructs HNSW graph edge topology without memory leaks or index downtime.
+- **Refresh List**: Poll the current database state at any time.
+
+---
+
+## Technical Highlights & Architecture
 
 ```text
   [ User Query: Text / Image ]
@@ -54,19 +107,15 @@ A production-ready, asynchronous Multimodal Vector Search and Retrieval-Augmente
 └─────────────────────────────────┘
 ```
 
----
-
-## Core Engineering & Design Highlights
-
 ### 1. Modality-Partitioned HNSW Vector Store
-Standard vector databases suffer from topological degradation when cross-modal embeddings (such as text vs. visual representations) share the same graph layer due to varying norm densities. This engine isolates modalities into dedicated HNSW graphs (`hnsw_text` and `hnsw_image`), unified by an atomic O(1) bidirectional index map:
+Standard vector databases suffer from topological degradation when cross-modal embeddings share the same graph layer due to varying norm densities. This engine isolates modalities into dedicated HNSW graphs (`hnsw_text` and `hnsw_image`), unified by an atomic $O(1)$ bidirectional index map:
 - **Lock-Free Read Operations:** Vector distance calculations utilize contiguous flat buffers without clone overhead.
-- **Topological Edge Pruning:** Heuristic neighbor diversity selection maintains strict degree bounds (M0 = 32, M = 16, ef = 64).
+- **Topological Edge Pruning:** Heuristic neighbor diversity selection maintains strict degree bounds ($M_0 = 32$, $M = 16$, $ef = 64$).
 - **Contiguous Memory Swapping:** Document removals use a tombstone-free `swap_remove` strategy to eliminate vector memory fragmentation.
 
 ### 2. Overcoming CLIP Anisotropy (Score Calibration)
-Raw cosine similarities for CLIP text embeddings inherently cluster in a narrow cone, producing a high background noise floor around ~0.67, while cross-modal image-to-text similarities typically range between 0.14 and 0.28.
-- **Piecewise Non-Linear Calibration:** Normalizes raw similarity scores into a uniform [0.0, 1.0] confidence space.
+Raw cosine similarities for CLIP text embeddings inherently cluster in a narrow cone, producing a high background noise floor around $\approx 0.67$, while cross-modal image-to-text similarities typically range between $0.14$ and $0.28$.
+- **Piecewise Non-Linear Calibration:** Normalizes raw similarity scores into a uniform $[0.0, 1.0]$ confidence space.
 - **Hybrid Lexical Boosting:** Dense vector retrieval is enriched with BM25-style token overlap matching, preventing semantic false positives on entity-specific queries.
 
 ### 3. Production Security & Multi-Stage SSRF Defense
@@ -77,26 +126,6 @@ Accepting remote image URLs exposes systems to Server-Side Request Forgery (SSRF
 
 ### 4. OOM-Safe Streaming Persistence
 Database snapshots are written to disk using a chunked streaming serializer via atomic temporary files (`.tmp.<pid>.<counter>`) and filesystem `rename`. This eliminates memory blowups during large dumps and prevents snapshot corruption on sudden termination.
-
----
-
-## Interactive Web Console
-
-The server includes an embedded, zero-dependency control panel accessible via browser at:
-```text
-[http://127.0.0.1:8080/](http://127.0.0.1:8080/)
-```
-
-<!-- 📸 PLACEHOLDER 2: СЮДА ВСТАВЬ ВТОРОЙ СКРИНШОТ (ПОИСК С РАНЖИРОВАНИЕМ ИЛИ RAG-ОТВЕТ) -->
-<!-- Перетащи второй скриншот сюда или вставь через Ctrl+V -->
-<p align="center">
-  <img src="assets/rag_demo.png" alt="RAG Generation and Real-time Search" width="100%" />
-</p>
-
-### Built-in Capabilities:
-- **Document Indexing:** Upload raw image files, provide external image URLs, or input structured text payloads.
-- **Similarity Explorer:** Live inspection of calibrated vector distance scores across text, image, and hybrid modalities.
-- **RAG Synthesis Inspector:** Real-time generation debugger displaying context budget allocations and verified source citations.
 
 ---
 
