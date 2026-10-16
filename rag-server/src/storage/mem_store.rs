@@ -2,186 +2,41 @@ use super::{
     dot_product,
     hnsw::{HnswConfig, HnswIndex},
     models::{SearchFilter, SearchResult, VectorPoint},
+    partition::StorageState,
+    persistence::{load_snapshot, save_snapshot},
+    scoring::{
+        CalibrationConfig, calculate_keyword_boost, calibrate_image_score, calibrate_text_score,
+        fuse_scores, has_image_keywords,
+    },
     traits::{DocumentSummary, VectorStore},
 };
 use crate::domain::{DocumentId, Modality};
 use crate::error::StorageError;
 use async_trait::async_trait;
-use serde::de::{Deserializer, SeqAccess, Visitor};
-use serde::{Deserialize, Serialize};
+use rayon::prelude::*;
+use rayon::slice::ParallelSlice;
 use serde_json::Value;
 use std::{
     cmp::Ordering,
     collections::{BinaryHeap, HashMap, HashSet},
-    fmt,
-    fs::File,
-    io::{BufReader, BufWriter, ErrorKind, Write},
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         Arc, Mutex as StdMutex, RwLock,
         atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering},
     },
 };
+
 pub const DEFAULT_MAX_CAPACITY: usize = 1_000_000;
 const L2_NORM_SQ_TOLERANCE: f32 = 1e-2;
 const HNSW_MIN_POINTS_THRESHOLD: usize = 128;
-const LOAD_BATCH_CHUNK_SIZE: usize = 1_000;
-const SNAPSHOT_SERIALIZE_CHUNK_SIZE: usize = 500;
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CalibrationConfig {
-    pub cross_modal_min: f32,
-    pub cross_modal_max: f32,
-    pub text_noise_floor: f32,
-    pub text_match_ceiling: f32,
-    pub text_modal_min: f32,
-    pub text_modal_max: f32,
-    pub image_trigger_boost: f32,
-}
-impl Default for CalibrationConfig {
-    fn default() -> Self {
-        Self {
-            cross_modal_min: 0.14,
-            cross_modal_max: 0.28,
-            text_noise_floor: 0.67,
-            text_match_ceiling: 0.78,
-            text_modal_min: 0.55,
-            text_modal_max: 0.95,
-            image_trigger_boost: 0.15,
-        }
-    }
-}
-#[inline]
-fn calibrate_text_score(raw_score: f32, cfg: &CalibrationConfig) -> f32 {
-    if raw_score <= cfg.text_noise_floor {
-        let floor = cfg.text_noise_floor.max(f32::EPSILON);
-        (raw_score / floor).powi(4) * 0.15
-    } else {
-        let denom = (cfg.text_match_ceiling - cfg.text_noise_floor).max(f32::EPSILON);
-        let norm = ((raw_score - cfg.text_noise_floor) / denom).clamp(0.0, 1.0);
-        0.20 + norm * 0.75
-    }
-}
-#[inline]
-fn calibrate_image_score(raw_score: f32, has_image_intent: bool, cfg: &CalibrationConfig) -> f32 {
-    let calibrated = if raw_score <= 0.0 {
-        0.0
-    } else if raw_score < cfg.cross_modal_min {
-        let cross_min = cfg.cross_modal_min.max(f32::EPSILON);
-        (raw_score / cross_min) * 0.25
-    } else if raw_score <= cfg.cross_modal_max {
-        let denom = (cfg.cross_modal_max - cfg.cross_modal_min).max(f32::EPSILON);
-        let normalized = (raw_score - cfg.cross_modal_min) / denom;
-        cfg.text_modal_min + normalized * (cfg.text_modal_max - cfg.text_modal_min)
-    } else {
-        let denom = (1.0 - cfg.cross_modal_max).max(f32::EPSILON);
-        let extra = ((raw_score - cfg.cross_modal_max) / denom).clamp(0.0, 1.0);
-        cfg.text_modal_max + extra * (0.98 - cfg.text_modal_max)
-    };
-    let mut calibrated = calibrated;
-    if has_image_intent && raw_score >= cfg.cross_modal_min {
-        calibrated = (calibrated + cfg.image_trigger_boost).min(1.0);
-    }
-    calibrated
-}
-fn calculate_keyword_boost(query_text: &str, payload: &Value) -> f32 {
-    let text = match payload.get("text").and_then(|v| v.as_str()) {
-        Some(t) => t,
-        None => return 0.0,
-    };
-    let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("");
-    let lower_doc = format!("{} {}", text, title).to_lowercase();
-    const STOP_WORDS: &[&str] = &[
-        "a", "an", "the", "in", "on", "at", "to", "for", "of", "with", "by", "from", "is", "are",
-        "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "and",
-        "or", "but", "if", "then", "else", "when", "here", "there", "why", "how", "all", "any",
-        "both", "each", "tell", "me", "about", "what", "which", "who", "whom", "this", "that",
-        "it", "its",
-    ];
-    let mut matches = 0;
-    let mut query_terms = 0;
-    for raw_token in query_text.split(|c: char| !c.is_alphanumeric()) {
-        let token = raw_token.trim().to_lowercase();
-        if token.len() < 3 || STOP_WORDS.contains(&token.as_str()) {
-            continue;
-        }
-        query_terms += 1;
-        let stem = token.strip_suffix('s').unwrap_or(&token);
-        if lower_doc.contains(&token) || lower_doc.contains(stem) {
-            matches += 1;
-        }
-    }
-    if query_terms > 0 && matches > 0 {
-        let ratio = matches as f32 / query_terms as f32;
-        0.18 * ratio
-    } else {
-        0.0
-    }
-}
-#[inline]
-fn has_image_keywords(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    const EXACT_KEYWORDS: &[&str] = &[
-        "photo",
-        "photos",
-        "image",
-        "images",
-        "picture",
-        "pictures",
-        "pic",
-        "pics",
-        "snapshot",
-        "snapshots",
-        "drawing",
-        "drawings",
-        "illustration",
-        "illustrations",
-        "фото",
-        "зображення",
-        "картинка",
-    ];
-    lower
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .any(|token| {
-            EXACT_KEYWORDS.contains(&token)
-                || token.starts_with("фотк")
-                || token.starts_with("фотограф")
-                || token.starts_with("картинк")
-                || token.starts_with("рисун")
-                || token.starts_with("изображен")
-                || token.starts_with("світлин")
-                || token.starts_with("малюн")
-        })
-}
-static TMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
-struct TempFileGuard<'a> {
-    path: &'a Path,
-    committed: bool,
-}
-impl<'a> TempFileGuard<'a> {
-    fn new(path: &'a Path) -> Self {
-        Self {
-            path,
-            committed: false,
-        }
-    }
-    fn commit(mut self) {
-        self.committed = true;
-    }
-}
-impl<'a> Drop for TempFileGuard<'a> {
-    fn drop(&mut self) {
-        if !self.committed {
-            let _ = std::fs::remove_file(self.path);
-        }
-    }
-}
+
 #[derive(Clone, Copy)]
 struct ScoredCandidate<'a> {
     score: f32,
     slot_idx: usize,
     id: &'a str,
 }
+
 impl<'a> PartialEq for ScoredCandidate<'a> {
     fn eq(&self, other: &Self) -> bool {
         self.score.total_cmp(&other.score) == Ordering::Equal && self.id == other.id
@@ -201,6 +56,7 @@ impl<'a> PartialOrd for ScoredCandidate<'a> {
         Some(self.cmp(other))
     }
 }
+
 #[inline]
 fn push_candidate<'a>(
     heap: &mut BinaryHeap<ScoredCandidate<'a>>,
@@ -217,108 +73,7 @@ fn push_candidate<'a>(
         heap.push(candidate);
     }
 }
-#[derive(Default)]
-struct StorageState {
-    index_map: HashMap<DocumentId, usize>,
-    vectors: Vec<f32>,
-    ids: Vec<Arc<str>>,
-    modalities: Vec<Modality>,
-    payloads: Vec<Arc<Value>>,
-}
-impl StorageState {
-    #[inline]
-    fn len(&self) -> usize {
-        self.ids.len()
-    }
-    fn upsert(
-        &mut self,
-        id: &DocumentId,
-        vector: &[f32],
-        payload: Arc<Value>,
-        modality: Modality,
-        dimension: usize,
-    ) -> (usize, bool) {
-        if let Some(&slot_idx) = self.index_map.get(id) {
-            let start = slot_idx * dimension;
-            self.vectors[start..start + dimension].copy_from_slice(vector);
-            self.modalities[slot_idx] = modality;
-            self.payloads[slot_idx] = payload;
-            (slot_idx, false)
-        } else {
-            let slot_idx = self.ids.len();
-            self.index_map.insert(id.clone(), slot_idx);
-            self.vectors.extend_from_slice(vector);
-            self.ids.push(Arc::from(id.as_str()));
-            self.modalities.push(modality);
-            self.payloads.push(payload);
-            (slot_idx, true)
-        }
-    }
-    fn remove(&mut self, id: &DocumentId, dimension: usize) -> Option<(usize, usize)> {
-        let slot_idx = self.index_map.remove(id)?;
-        let last_idx = self.ids.len() - 1;
-        if slot_idx != last_idx {
-            let src_start = last_idx * dimension;
-            let dst_start = slot_idx * dimension;
-            self.vectors
-                .copy_within(src_start..src_start + dimension, dst_start);
-            self.ids.swap_remove(slot_idx);
-            self.modalities.swap_remove(slot_idx);
-            self.payloads.swap_remove(slot_idx);
-            let moved_id = self.ids[slot_idx].to_string();
-            if let Some(mapped_slot) = self.index_map.get_mut(&moved_id) {
-                *mapped_slot = slot_idx;
-            }
-        } else {
-            self.ids.pop();
-            self.modalities.pop();
-            self.payloads.pop();
-        }
-        self.vectors.truncate(last_idx * dimension);
-        Some((slot_idx, last_idx))
-    }
-}
-struct BatchLoaderVisitor<'a> {
-    store: &'a InMemoryVectorStore,
-}
-impl<'de, 'a> Visitor<'de> for BatchLoaderVisitor<'a> {
-    type Value = ();
-    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a JSON array of VectorPoints")
-    }
-    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        let mut batch = Vec::with_capacity(LOAD_BATCH_CHUNK_SIZE);
-        while let Some(point) = seq.next_element::<VectorPoint>()? {
-            if point.id.trim().is_empty() {
-                return Err(serde::de::Error::custom("Document ID cannot be empty"));
-            }
-            self.store
-                .validate_vector(&point.vector)
-                .map_err(serde::de::Error::custom)?;
-            if let Some(ref img_v) = point.image_vector {
-                self.store
-                    .validate_vector(img_v)
-                    .map_err(serde::de::Error::custom)?;
-            }
-            batch.push(point);
-            if batch.len() >= LOAD_BATCH_CHUNK_SIZE {
-                self.store
-                    .insert_batch_blocking(std::mem::take(&mut batch))
-                    .map_err(serde::de::Error::custom)?;
-                batch.reserve(LOAD_BATCH_CHUNK_SIZE);
-            }
-        }
-        if !batch.is_empty() {
-            self.store
-                .insert_batch_blocking(batch)
-                .map_err(serde::de::Error::custom)?;
-        }
-        Ok(())
-    }
-}
+
 #[derive(Clone)]
 pub struct InMemoryVectorStore {
     dimension: usize,
@@ -333,6 +88,7 @@ pub struct InMemoryVectorStore {
     version: Arc<AtomicU64>,
     persisted_version: Arc<AtomicU64>,
 }
+
 impl InMemoryVectorStore {
     pub fn new(dimension: usize) -> Self {
         Self::with_config(
@@ -341,9 +97,11 @@ impl InMemoryVectorStore {
             CalibrationConfig::default(),
         )
     }
+
     pub fn with_capacity(dimension: usize, max_capacity: usize) -> Self {
         Self::with_config(dimension, max_capacity, CalibrationConfig::default())
     }
+
     pub fn with_config(
         dimension: usize,
         max_capacity: usize,
@@ -363,11 +121,25 @@ impl InMemoryVectorStore {
             persisted_version: Arc::new(AtomicU64::new(0)),
         }
     }
+
+    pub fn dimension(&self) -> usize {
+        self.dimension
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.version.load(AtomicOrdering::Acquire)
             > self.persisted_version.load(AtomicOrdering::Acquire)
     }
-    fn validate_vector(&self, vector: &[f32]) -> Result<(), StorageError> {
+
+    pub fn max_capacity(&self) -> usize {
+        self.max_capacity
+    }
+
+    pub fn calibration(&self) -> &CalibrationConfig {
+        &self.calibration
+    }
+
+    pub(crate) fn validate_vector(&self, vector: &[f32]) -> Result<(), StorageError> {
         if self.dimension == 0 {
             return Err(StorageError::InvalidVector(
                 "Vector store configured with invalid dimension 0".into(),
@@ -401,6 +173,7 @@ impl InMemoryVectorStore {
         }
         Ok(())
     }
+
     fn validate_filter(filter: &Option<SearchFilter>) -> Result<(), StorageError> {
         if let Some(min_score) = filter
             .as_ref()
@@ -413,6 +186,7 @@ impl InMemoryVectorStore {
         }
         Ok(())
     }
+
     fn insert_into_state_and_hnsw(
         state: &mut StorageState,
         hnsw: &RwLock<HnswIndex>,
@@ -423,7 +197,6 @@ impl InMemoryVectorStore {
         dimension: usize,
     ) -> Result<(), StorageError> {
         let (slot_idx, was_new) = state.upsert(id, vector, payload, modality, dimension);
-
         let mut hnsw_lock = hnsw
             .write()
             .map_err(|_| StorageError::Internal("HNSW index write lock poisoned".into()))?;
@@ -436,6 +209,7 @@ impl InMemoryVectorStore {
         hnsw_lock.insert(slot_idx, pt_slice, &state.vectors, dimension);
         Ok(())
     }
+
     fn remove_from_state_and_hnsw(
         state: &mut StorageState,
         hnsw: &RwLock<HnswIndex>,
@@ -452,13 +226,15 @@ impl InMemoryVectorStore {
             Ok(false)
         }
     }
-    fn insert_blocking(&self, point: VectorPoint) -> Result<(), StorageError> {
+
+    pub(crate) fn insert_blocking(&self, point: VectorPoint) -> Result<(), StorageError> {
         let mut t_state = self.text_state.write().map_err(|_| {
             StorageError::Internal("Vector store text_state write lock poisoned".into())
         })?;
         let mut i_state = self.image_state.write().map_err(|_| {
             StorageError::Internal("Vector store image_state write lock poisoned".into())
         })?;
+
         let is_existing =
             t_state.index_map.contains_key(&point.id) || i_state.index_map.contains_key(&point.id);
         let current_count = self.doc_count.load(AtomicOrdering::Acquire);
@@ -468,6 +244,7 @@ impl InMemoryVectorStore {
                 max: self.max_capacity,
             });
         }
+
         let payload_arc = Arc::new(point.payload);
         match point.modality {
             Modality::Text => {
@@ -510,6 +287,7 @@ impl InMemoryVectorStore {
                 self.validate_vector(&point.vector)?;
                 let img_vec = point.image_vector.as_deref().unwrap_or(&point.vector);
                 self.validate_vector(img_vec)?;
+
                 Self::insert_into_state_and_hnsw(
                     &mut t_state,
                     &self.hnsw_text,
@@ -530,22 +308,29 @@ impl InMemoryVectorStore {
                 )?;
             }
         }
+
         if !is_existing {
             self.doc_count.fetch_add(1, AtomicOrdering::Release);
         }
         self.version.fetch_add(1, AtomicOrdering::Release);
         Ok(())
     }
-    fn insert_batch_blocking(&self, points: Vec<VectorPoint>) -> Result<(), StorageError> {
+
+    pub(crate) fn insert_batch_blocking(
+        &self,
+        points: Vec<VectorPoint>,
+    ) -> Result<(), StorageError> {
         let mut t_state = self.text_state.write().map_err(|_| {
             StorageError::Internal("Vector store text_state write lock poisoned".into())
         })?;
         let mut i_state = self.image_state.write().map_err(|_| {
             StorageError::Internal("Vector store image_state write lock poisoned".into())
         })?;
+
         let current_count = self.doc_count.load(AtomicOrdering::Acquire);
         let mut new_unique_count = 0;
         let mut seen_in_batch = HashSet::with_capacity(points.len());
+
         for pt in &points {
             let is_existing =
                 t_state.index_map.contains_key(&pt.id) || i_state.index_map.contains_key(&pt.id);
@@ -553,16 +338,19 @@ impl InMemoryVectorStore {
                 new_unique_count += 1;
             }
         }
+
         if current_count + new_unique_count > self.max_capacity {
             return Err(StorageError::CapacityExceeded {
                 current: current_count,
                 max: self.max_capacity,
             });
         }
+
         for point in points {
             let is_existing = t_state.index_map.contains_key(&point.id)
                 || i_state.index_map.contains_key(&point.id);
             let payload_arc = Arc::new(point.payload);
+
             match point.modality {
                 Modality::Text => {
                     Self::insert_into_state_and_hnsw(
@@ -620,13 +408,16 @@ impl InMemoryVectorStore {
                     )?;
                 }
             }
+
             if !is_existing {
                 self.doc_count.fetch_add(1, AtomicOrdering::Release);
             }
         }
+
         self.version.fetch_add(1, AtomicOrdering::Release);
         Ok(())
     }
+
     fn search_partition_zero_copy(
         hnsw: &RwLock<HnswIndex>,
         state: &RwLock<StorageState>,
@@ -642,6 +433,7 @@ impl InMemoryVectorStore {
         if total_points == 0 {
             return Ok(Vec::new());
         }
+
         let effective_limit = limit.min(total_points);
         let candidates: Vec<(f32, usize)> = if total_points >= HNSW_MIN_POINTS_THRESHOLD {
             let hnsw_lock = hnsw
@@ -677,6 +469,7 @@ impl InMemoryVectorStore {
                 dimension,
             )
         };
+
         let mut results = Vec::with_capacity(candidates.len());
         for (score, slot) in candidates {
             results.push((
@@ -687,6 +480,7 @@ impl InMemoryVectorStore {
         }
         Ok(results)
     }
+
     fn exact_flat_scan(
         state: &StorageState,
         query: &[f32],
@@ -694,36 +488,86 @@ impl InMemoryVectorStore {
         filter: &Option<SearchFilter>,
         dim: usize,
     ) -> Vec<(f32, usize)> {
+        if limit == 0 || state.is_empty() {
+            return Vec::new();
+        }
+
         let min_score = filter.as_ref().and_then(|f| f.min_score);
         let target_mod = filter.as_ref().and_then(|f| f.modality.as_ref());
-        let mut heap = BinaryHeap::with_capacity(limit);
-        for (slot_idx, point_vec) in state.vectors.chunks_exact(dim).enumerate() {
-            if let Some(modality) = target_mod {
-                let doc_mod = &state.modalities[slot_idx];
-                let matches = doc_mod == modality || *doc_mod == Modality::Multimodal;
-                if !matches {
+
+        // Для коллекций < 256 векторов последовательный проход быстрее,
+        // так как отсутствует оверхед на координацию рабочих потоков Rayon.
+        let heap = if state.len() < 256 {
+            let mut heap = BinaryHeap::with_capacity(limit);
+            for (slot_idx, point_vec) in state.vectors.chunks_exact(dim).enumerate() {
+                if let Some(modality) = target_mod {
+                    let doc_mod = &state.modalities[slot_idx];
+                    let matches = doc_mod == modality || *doc_mod == Modality::Multimodal;
+                    if !matches {
+                        continue;
+                    }
+                }
+                let score = dot_product(query, point_vec);
+                if !score.is_finite() || min_score.is_some_and(|min| score < min) {
                     continue;
                 }
+                push_candidate(
+                    &mut heap,
+                    ScoredCandidate {
+                        score,
+                        slot_idx,
+                        id: &state.ids[slot_idx],
+                    },
+                    limit,
+                );
             }
-            let score = dot_product(query, point_vec);
-            if !score.is_finite() {
-                continue;
-            }
-            if min_score.is_some_and(|min| score < min) {
-                continue;
-            }
-            push_candidate(
-                &mut heap,
-                ScoredCandidate {
-                    score,
-                    slot_idx,
-                    id: &state.ids[slot_idx],
-                },
-                limit,
-            );
-        }
+            heap
+        } else {
+            state
+                .vectors
+                .as_slice()
+                .par_chunks_exact(dim)
+                .enumerate()
+                .fold(
+                    || BinaryHeap::with_capacity(limit),
+                    |mut local_heap, (slot_idx, point_vec)| {
+                        if let Some(modality) = target_mod {
+                            let doc_mod = &state.modalities[slot_idx];
+                            let matches = doc_mod == modality || *doc_mod == Modality::Multimodal;
+                            if !matches {
+                                return local_heap;
+                            }
+                        }
+                        let score = dot_product(query, point_vec);
+                        if !score.is_finite() || min_score.is_some_and(|min| score < min) {
+                            return local_heap;
+                        }
+                        push_candidate(
+                            &mut local_heap,
+                            ScoredCandidate {
+                                score,
+                                slot_idx,
+                                id: &state.ids[slot_idx],
+                            },
+                            limit,
+                        );
+                        local_heap
+                    },
+                )
+                .reduce(
+                    || BinaryHeap::with_capacity(limit),
+                    |mut heap_a, heap_b| {
+                        for cand in heap_b {
+                            push_candidate(&mut heap_a, cand, limit);
+                        }
+                        heap_a
+                    },
+                )
+        };
+
         let mut res = Vec::with_capacity(heap.len());
-        while let Some(c) = heap.pop() {
+        let mut sorted_heap = heap;
+        while let Some(c) = sorted_heap.pop() {
             res.push((c.score, c.slot_idx));
         }
         res.reverse();
@@ -737,10 +581,12 @@ impl InMemoryVectorStore {
     ) -> Result<Vec<SearchResult>, StorageError> {
         let search_k = limit.saturating_mul(2).max(10);
         let explicit_modality_filter = filter.as_ref().and_then(|f| f.modality.as_ref());
+
         let mut partition_filter = filter.clone();
         if let Some(ref mut pf) = partition_filter {
             pf.min_score = None;
         }
+
         let (text_matches, image_matches) = match explicit_modality_filter {
             Some(Modality::Text) => {
                 let t_res = Self::search_partition_zero_copy(
@@ -784,6 +630,7 @@ impl InMemoryVectorStore {
                 (t_res, i_res)
             }
         };
+
         let effective_query_modality = filter
             .as_ref()
             .and_then(|f| f.query_modality.clone())
@@ -799,10 +646,12 @@ impl InMemoryVectorStore {
                     None
                 }
             });
+
         let has_image_intent = filter
             .as_ref()
             .and_then(|f| f.query_text.as_deref())
             .is_some_and(has_image_keywords);
+
         struct FastMatch {
             id: Arc<str>,
             score: f32,
@@ -811,8 +660,10 @@ impl InMemoryVectorStore {
             modality: Modality,
             matched_by: Modality,
         }
+
         let mut merged: HashMap<Arc<str>, FastMatch> =
             HashMap::with_capacity(text_matches.len() + image_matches.len());
+
         for (id, score, modality) in text_matches {
             let final_score = match effective_query_modality {
                 Some(Modality::Image) => calibrate_image_score(score, false, &self.calibration),
@@ -833,6 +684,7 @@ impl InMemoryVectorStore {
                 },
             );
         }
+
         for (id, raw_score, modality) in image_matches {
             let img_final = match effective_query_modality {
                 Some(Modality::Text) | Some(Modality::Multimodal) => {
@@ -840,26 +692,14 @@ impl InMemoryVectorStore {
                 }
                 _ => raw_score,
             };
+
             if let Some(existing) = merged.get_mut(&id) {
                 existing.img_score = Some(img_final);
-                if effective_query_modality == Some(Modality::Text) {
-                    let text_s = existing.text_score.unwrap_or(existing.score);
-                    let fused = 0.55 * img_final + 0.45 * text_s;
-                    existing.score = fused.min(1.0);
-                    existing.matched_by = if img_final > text_s {
-                        Modality::Image
-                    } else {
-                        Modality::Text
-                    };
-                } else if effective_query_modality == Some(Modality::Image) {
-                    let text_s = existing.text_score.unwrap_or(existing.score);
-                    let fused = 0.70 * img_final + 0.30 * text_s;
-                    existing.score = fused.min(1.0);
-                    existing.matched_by = Modality::Image;
-                } else if img_final > existing.score {
-                    existing.score = img_final;
-                    existing.matched_by = Modality::Image;
-                }
+                let text_s = existing.text_score.unwrap_or(existing.score);
+                let (fused, matched_by) =
+                    fuse_scores(effective_query_modality.as_ref(), img_final, text_s);
+                existing.score = fused;
+                existing.matched_by = matched_by;
             } else {
                 merged.insert(
                     Arc::clone(&id),
@@ -874,12 +714,14 @@ impl InMemoryVectorStore {
                 );
             }
         }
+
         let t_lock = self.text_state.read().map_err(|_| {
             StorageError::Internal("Vector store text_state read lock poisoned".into())
         })?;
         let i_lock = self.image_state.read().map_err(|_| {
             StorageError::Internal("Vector store image_state read lock poisoned".into())
         })?;
+
         if let Some(query_str) = filter.as_ref().and_then(|f| f.query_text.as_deref()) {
             for m in merged.values_mut() {
                 let doc_id = m.id.to_string();
@@ -897,6 +739,7 @@ impl InMemoryVectorStore {
                 }
             }
         }
+
         let mut ranked: Vec<FastMatch> = merged.into_values().collect();
         if let Some(ref f) = filter {
             if let Some(min_s) = f.min_score {
@@ -908,6 +751,7 @@ impl InMemoryVectorStore {
         }
         ranked.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
         ranked.truncate(limit);
+
         let mut final_results = Vec::with_capacity(ranked.len());
         for item in ranked {
             let doc_id = item.id.to_string();
@@ -926,24 +770,76 @@ impl InMemoryVectorStore {
                 matched_by: Some(item.matched_by),
             });
         }
+
         Ok(final_results)
     }
+
+    pub(crate) fn collect_points_for_snapshot(
+        &self,
+        chunk: &[DocumentId],
+        dim: usize,
+    ) -> Result<Vec<VectorPoint>, StorageError> {
+        let t_lock = self.text_state.read().map_err(|_| {
+            StorageError::Internal("Vector store text_state read lock poisoned".into())
+        })?;
+        let i_lock = self.image_state.read().map_err(|_| {
+            StorageError::Internal("Vector store image_state read lock poisoned".into())
+        })?;
+
+        let mut pts = Vec::with_capacity(chunk.len());
+        for id in chunk {
+            let t_slot = t_lock.index_map.get(id).copied();
+            let i_slot = i_lock.index_map.get(id).copied();
+            match (t_slot, i_slot) {
+                (Some(ts), Some(is)) => {
+                    let text_vec = t_lock.vectors[ts * dim..(ts + 1) * dim].to_vec();
+                    let img_vec = i_lock.vectors[is * dim..(is + 1) * dim].to_vec();
+                    pts.push(
+                        VectorPoint::new(
+                            id.clone(),
+                            text_vec,
+                            (*t_lock.payloads[ts]).clone(),
+                            Modality::Multimodal,
+                        )
+                        .with_image_vector(img_vec),
+                    );
+                }
+                (Some(ts), None) => {
+                    let text_vec = t_lock.vectors[ts * dim..(ts + 1) * dim].to_vec();
+                    pts.push(VectorPoint::new(
+                        id.clone(),
+                        text_vec,
+                        (*t_lock.payloads[ts]).clone(),
+                        Modality::Text,
+                    ));
+                }
+                (None, Some(is)) => {
+                    let img_vec = i_lock.vectors[is * dim..(is + 1) * dim].to_vec();
+                    pts.push(VectorPoint::new(
+                        id.clone(),
+                        img_vec,
+                        (*i_lock.payloads[is]).clone(),
+                        Modality::Image,
+                    ));
+                }
+                (None, None) => {}
+            }
+        }
+        Ok(pts)
+    }
+
     fn save_to_disk_blocking(&self, path: &Path) -> Result<(), StorageError> {
         let _guard = self
             .disk_lock
             .lock()
             .map_err(|_| StorageError::Internal("Disk lock poisoned".into()))?;
+
         let current_version = self.version.load(AtomicOrdering::Acquire);
         let saved_version = self.persisted_version.load(AtomicOrdering::Acquire);
         if current_version <= saved_version && path.exists() {
             return Ok(());
         }
-        let counter = TMP_FILE_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
-        let pid = std::process::id();
-        let tmp_path = PathBuf::from(format!("{}.tmp.{}.{}", path.display(), pid, counter));
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            let _ = std::fs::create_dir_all(parent);
-        }
+
         let all_ids: Vec<DocumentId> = {
             let t_lock = self.text_state.read().map_err(|_| {
                 StorageError::Internal("Vector store text_state read lock poisoned".into())
@@ -956,132 +852,24 @@ impl InMemoryVectorStore {
             ids.extend(i_lock.index_map.keys().cloned());
             ids.into_iter().collect()
         };
-        let tmp_guard = TempFileGuard::new(&tmp_path);
-        {
-            let file = File::create(&tmp_path).map_err(|e| {
-                StorageError::Internal(format!("Failed to create temp snapshot: {e}"))
-            })?;
-            let mut writer = BufWriter::new(file);
-            writer
-                .write_all(b"[\n")
-                .map_err(|e| StorageError::Internal(format!("IO error: {e}")))?;
-            let mut first = true;
-            for chunk in all_ids.chunks(SNAPSHOT_SERIALIZE_CHUNK_SIZE) {
-                let chunk_points = {
-                    let t_lock = self.text_state.read().map_err(|_| {
-                        StorageError::Internal("Vector store text_state read lock poisoned".into())
-                    })?;
-                    let i_lock = self.image_state.read().map_err(|_| {
-                        StorageError::Internal("Vector store image_state read lock poisoned".into())
-                    })?;
-                    let dim = self.dimension;
-                    let mut pts = Vec::with_capacity(chunk.len());
-                    for id in chunk {
-                        let t_slot = t_lock.index_map.get(id).copied();
-                        let i_slot = i_lock.index_map.get(id).copied();
-                        match (t_slot, i_slot) {
-                            (Some(ts), Some(is)) => {
-                                let text_vec = t_lock.vectors[ts * dim..(ts + 1) * dim].to_vec();
-                                let img_vec = i_lock.vectors[is * dim..(is + 1) * dim].to_vec();
-                                pts.push(
-                                    VectorPoint::new(
-                                        id.clone(),
-                                        text_vec,
-                                        (*t_lock.payloads[ts]).clone(),
-                                        Modality::Multimodal,
-                                    )
-                                    .with_image_vector(img_vec),
-                                );
-                            }
-                            (Some(ts), None) => {
-                                let text_vec = t_lock.vectors[ts * dim..(ts + 1) * dim].to_vec();
-                                pts.push(VectorPoint::new(
-                                    id.clone(),
-                                    text_vec,
-                                    (*t_lock.payloads[ts]).clone(),
-                                    Modality::Text,
-                                ));
-                            }
-                            (None, Some(is)) => {
-                                let img_vec = i_lock.vectors[is * dim..(is + 1) * dim].to_vec();
-                                pts.push(VectorPoint::new(
-                                    id.clone(),
-                                    img_vec,
-                                    (*i_lock.payloads[is]).clone(),
-                                    Modality::Image,
-                                ));
-                            }
-                            (None, None) => {}
-                        }
-                    }
-                    pts
-                };
-                for pt in chunk_points {
-                    if !first {
-                        writer
-                            .write_all(b",\n")
-                            .map_err(|e| StorageError::Internal(format!("IO error: {e}")))?;
-                    }
-                    first = false;
-                    serde_json::to_writer(&mut writer, &pt)
-                        .map_err(|e| StorageError::Internal(format!("Serialization error: {e}")))?;
-                }
-            }
-            writer
-                .write_all(b"\n]")
-                .map_err(|e| StorageError::Internal(format!("IO error: {e}")))?;
-            writer
-                .flush()
-                .map_err(|e| StorageError::Internal(format!("Failed to flush snapshot: {e}")))?;
-            let underlying_file = writer
-                .into_inner()
-                .map_err(|e| StorageError::Internal(e.to_string()))?;
-            underlying_file
-                .sync_all()
-                .map_err(|e| StorageError::Internal(format!("Failed to fsync snapshot: {e}")))?;
-        }
-        if let Err(rename_err) = std::fs::rename(&tmp_path, path) {
-            if path.exists() {
-                let _ = std::fs::remove_file(path);
-                std::fs::rename(&tmp_path, path).map_err(|e| {
-                    StorageError::Internal(format!(
-                        "Failed to commit snapshot after file replacement: {e}"
-                    ))
-                })?;
-            } else {
-                return Err(StorageError::Internal(format!(
-                    "Failed to commit snapshot: {rename_err}"
-                )));
-            }
-        }
-        tmp_guard.commit();
+
+        save_snapshot(self, path, &all_ids)?;
+
         self.persisted_version
             .store(current_version, AtomicOrdering::Release);
         Ok(())
     }
+
     fn load_from_disk_blocking(&self, path: &Path) -> Result<usize, StorageError> {
         let _guard = self
             .disk_lock
             .lock()
             .map_err(|_| StorageError::Internal("Disk lock poisoned".into()))?;
-        let file = match File::open(path) {
-            Ok(f) => f,
-            Err(err) if err.kind() == ErrorKind::NotFound => {
-                return Ok(0);
-            }
-            Err(err) => {
-                return Err(StorageError::Internal(format!(
-                    "Failed to open snapshot: {err}"
-                )));
-            }
+
+        let Some(temp_store) = load_snapshot(self, path)? else {
+            return Ok(0);
         };
-        let reader = BufReader::new(file);
-        let mut deserializer = serde_json::Deserializer::from_reader(reader);
-        let temp_store =
-            Self::with_config(self.dimension, self.max_capacity, self.calibration.clone());
-        deserializer
-            .deserialize_seq(BatchLoaderVisitor { store: &temp_store })
-            .map_err(|e| StorageError::Serialization(format!("Corrupt snapshot file: {e}")))?;
+
         let loaded_count;
         {
             let mut t_state = self.text_state.write().map_err(|_| {
@@ -1115,21 +903,25 @@ impl InMemoryVectorStore {
                 .hnsw_image
                 .write()
                 .map_err(|_| StorageError::Internal("Temp HNSW image lock poisoned".into()))?;
+
             let mut all_ids = HashSet::new();
             all_ids.extend(temp_t_state.index_map.keys().cloned());
             all_ids.extend(temp_i_state.index_map.keys().cloned());
             loaded_count = all_ids.len();
+
             *t_state = std::mem::take(&mut *temp_t_state);
             *i_state = std::mem::take(&mut *temp_i_state);
             *hnsw_t = std::mem::replace(&mut *temp_hnsw_t, HnswIndex::new(HnswConfig::default()));
             *hnsw_i = std::mem::replace(&mut *temp_hnsw_i, HnswIndex::new(HnswConfig::default()));
         }
+
         self.doc_count.store(loaded_count, AtomicOrdering::Release);
         self.version.store(0, AtomicOrdering::Release);
         self.persisted_version.store(0, AtomicOrdering::Release);
         Ok(loaded_count)
     }
 }
+
 #[async_trait]
 impl VectorStore for InMemoryVectorStore {
     async fn insert(&self, point: VectorPoint) -> Result<(), StorageError> {
@@ -1147,11 +939,13 @@ impl VectorStore for InMemoryVectorStore {
         if let Some(ref img_v) = point.image_vector {
             self.validate_vector(img_v)?;
         }
+
         let store = self.clone();
         tokio::task::spawn_blocking(move || store.insert_blocking(point))
             .await
             .map_err(|e| StorageError::Internal(format!("Insert task failed to join: {e}")))?
     }
+
     async fn insert_batch(&self, points: Vec<VectorPoint>) -> Result<(), StorageError> {
         if self.dimension == 0 {
             return Err(StorageError::InvalidVector(
@@ -1169,11 +963,13 @@ impl VectorStore for InMemoryVectorStore {
                 self.validate_vector(img_v)?;
             }
         }
+
         let store = self.clone();
         tokio::task::spawn_blocking(move || store.insert_batch_blocking(points))
             .await
             .map_err(|e| StorageError::Internal(format!("Insert batch task failed to join: {e}")))?
     }
+
     async fn search(
         &self,
         query_vector: &[f32],
@@ -1185,12 +981,14 @@ impl VectorStore for InMemoryVectorStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
+
         let store = self.clone();
         let q = query_vector.to_vec();
         tokio::task::spawn_blocking(move || store.search_blocking(&q, limit, filter))
             .await
             .map_err(|e| StorageError::Internal(format!("Search task failed to join: {e}")))?
     }
+
     async fn get(&self, id: &DocumentId) -> Result<Option<VectorPoint>, StorageError> {
         let t_lock = self.text_state.read().map_err(|_| {
             StorageError::Internal("Vector store text_state read lock poisoned".into())
@@ -1198,11 +996,13 @@ impl VectorStore for InMemoryVectorStore {
         let i_lock = self.image_state.read().map_err(|_| {
             StorageError::Internal("Vector store image_state read lock poisoned".into())
         })?;
+
         let t_slot = t_lock.index_map.get(id).copied();
         let i_slot = i_lock.index_map.get(id).copied();
         if t_slot.is_none() && i_slot.is_none() {
             return Ok(None);
         }
+
         let dim = self.dimension;
         match (t_slot, i_slot) {
             (Some(ts), Some(is)) => {
@@ -1239,6 +1039,7 @@ impl VectorStore for InMemoryVectorStore {
             (None, None) => Ok(None),
         }
     }
+
     async fn list_documents(&self) -> Result<Vec<DocumentSummary>, StorageError> {
         let t_lock = self.text_state.read().map_err(|_| {
             StorageError::Internal("Vector store text_state read lock poisoned".into())
@@ -1246,9 +1047,11 @@ impl VectorStore for InMemoryVectorStore {
         let i_lock = self.image_state.read().map_err(|_| {
             StorageError::Internal("Vector store image_state read lock poisoned".into())
         })?;
+
         let mut all_ids: HashSet<DocumentId> = HashSet::with_capacity(t_lock.len() + i_lock.len());
         all_ids.extend(t_lock.index_map.keys().cloned());
         all_ids.extend(i_lock.index_map.keys().cloned());
+
         let mut summaries = Vec::with_capacity(all_ids.len());
         for id in all_ids {
             let in_text = t_lock.index_map.get(&id).copied();
@@ -1268,6 +1071,7 @@ impl VectorStore for InMemoryVectorStore {
         summaries.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(summaries)
     }
+
     async fn delete(&self, id: &DocumentId) -> Result<bool, StorageError> {
         let mut t_state = self.text_state.write().map_err(|_| {
             StorageError::Internal("Vector store text_state write lock poisoned".into())
@@ -1275,33 +1079,40 @@ impl VectorStore for InMemoryVectorStore {
         let mut i_state = self.image_state.write().map_err(|_| {
             StorageError::Internal("Vector store image_state write lock poisoned".into())
         })?;
+
         let del_text =
             Self::remove_from_state_and_hnsw(&mut t_state, &self.hnsw_text, id, self.dimension)?;
         let del_image =
             Self::remove_from_state_and_hnsw(&mut i_state, &self.hnsw_image, id, self.dimension)?;
         let deleted = del_text || del_image;
+
         if deleted {
             self.doc_count.fetch_sub(1, AtomicOrdering::Release);
             self.version.fetch_add(1, AtomicOrdering::Release);
         }
         Ok(deleted)
     }
+
     async fn count(&self) -> Result<usize, StorageError> {
         Ok(self.doc_count.load(AtomicOrdering::Acquire))
     }
+
     fn dimension(&self) -> usize {
         self.dimension
     }
+
     async fn save_to_disk(&self, path: &Path) -> Result<(), StorageError> {
         if !self.is_dirty() && path.exists() {
             return Ok(());
         }
+
         let store = self.clone();
         let target_path = path.to_path_buf();
         tokio::task::spawn_blocking(move || store.save_to_disk_blocking(&target_path))
             .await
             .map_err(|e| StorageError::Internal(format!("Save snapshot task panicked: {e}")))?
     }
+
     async fn load_from_disk(&self, path: &Path) -> Result<usize, StorageError> {
         let store = self.clone();
         let target_path = path.to_path_buf();

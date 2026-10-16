@@ -1,0 +1,81 @@
+# Настройка оболочки для Windows без предупреждения deprecation
+[windows]
+set shell := ["powershell.exe", "-NoLogo", "-ExecutionPolicy", "Bypass", "-Command"]
+
+# Список доступных команд по умолчанию
+default:
+    @just --list
+
+# Рецепт скачивания моделей для Windows
+[windows]
+download-models:
+    #!powershell
+    $ErrorActionPreference = "Stop"
+    $modelsDir = Join-Path "{{ justfile_directory() }}" "models"
+
+    if (-not (Test-Path -Path $modelsDir)) {
+        Write-Host "Creating models directory: $modelsDir"
+        New-Item -ItemType Directory -Force -Path $modelsDir | Out-Null
+    }
+
+    $baseUrl = "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main"
+    $models = @(
+        @{ Name = "tokenizer.json"; Url = "$baseUrl/tokenizer.json" },
+        @{ Name = "text_model.onnx"; Url = "$baseUrl/onnx/text_model.onnx" },
+        @{ Name = "vision_model.onnx"; Url = "$baseUrl/onnx/vision_model.onnx" }
+    )
+
+    Write-Host "=== Checking and downloading ONNX CLIP models ==="
+    Write-Host "Target folder: $modelsDir"
+
+    foreach ($item in $models) {
+        $targetPath = Join-Path $modelsDir $item.Name
+        if (Test-Path -Path $targetPath) {
+            Write-Host "✓ $($item.Name) already exists, skipping."
+        } else {
+            Write-Host "-> Downloading $($item.Name)..."
+            & curl.exe --create-dirs -L --fail --retry 3 $item.Url -o $targetPath
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "Failed to download $($item.Name). Exit code: $LASTEXITCODE"
+                exit $LASTEXITCODE
+            }
+            Write-Host "✓ $($item.Name) successfully downloaded."
+        }
+    }
+
+    Write-Host "=== All model files are verified and ready! ==="
+
+# Рецепт скачивания моделей для Linux и macOS
+[unix]
+download-models:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    MODELS_DIR="{{ justfile_directory() }}/models"
+    mkdir -p "$MODELS_DIR"
+
+    BASE_URL="https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main"
+    MODELS=(
+        "tokenizer.json:$BASE_URL/tokenizer.json"
+        "text_model.onnx:$BASE_URL/onnx/text_model.onnx"
+        "vision_model.onnx:$BASE_URL/onnx/vision_model.onnx"
+    )
+
+    echo "=== Checking and downloading ONNX CLIP models ==="
+    echo "Target folder: $MODELS_DIR"
+
+    for ITEM in "${MODELS[@]}"; do
+        NAME="${ITEM%%:*}"
+        URL="${ITEM#*:}"
+        TARGET_PATH="$MODELS_DIR/$NAME"
+
+        if [ -f "$TARGET_PATH" ]; then
+            echo "✓ $NAME already exists, skipping."
+        else
+            echo "-> Downloading $NAME..."
+            curl -L --fail --retry 3 --create-dirs "$URL" -o "$TARGET_PATH"
+            echo "✓ $NAME successfully downloaded."
+        fi
+    done
+
+    echo "=== All model files are verified and ready! ==="

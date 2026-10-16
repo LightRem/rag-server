@@ -5,7 +5,9 @@ use rag_server::{
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+
 static TEST_ID_GEN: AtomicU64 = AtomicU64::new(0);
+
 fn generate_temp_path(prefix: &str) -> PathBuf {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -15,6 +17,7 @@ fn generate_temp_path(prefix: &str) -> PathBuf {
     let pid = std::process::id();
     std::env::temp_dir().join(format!("{prefix}_{pid}_{timestamp}_{unique_counter}.json"))
 }
+
 #[tokio::test]
 async fn test_snapshot_roundtrip_restores_hnsw_search() {
     let dim = 4;
@@ -49,6 +52,7 @@ async fn test_snapshot_roundtrip_restores_hnsw_search() {
     assert_eq!(search_res[0].id, "doc_alpha");
     let _ = tokio::fs::remove_file(&snapshot_file).await;
 }
+
 #[tokio::test]
 async fn test_snapshot_missing_file_handled_gracefully() {
     let store = InMemoryVectorStore::new(4);
@@ -57,6 +61,7 @@ async fn test_snapshot_missing_file_handled_gracefully() {
     assert!(res.is_ok());
     assert_eq!(res.unwrap(), 0);
 }
+
 #[tokio::test]
 async fn test_snapshot_corrupted_data_returns_error() {
     let store = InMemoryVectorStore::new(4);
@@ -68,6 +73,7 @@ async fn test_snapshot_corrupted_data_returns_error() {
     assert!(res.is_err());
     let _ = tokio::fs::remove_file(&corrupt_file).await;
 }
+
 #[tokio::test]
 async fn test_snapshot_atomic_write_cleans_up_tmp_file() {
     let store = InMemoryVectorStore::new(4);

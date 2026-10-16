@@ -7,7 +7,9 @@ use rag_server::{
 };
 use serde_json::json;
 use std::sync::Arc;
+
 struct MockTextEmbedder;
+
 #[async_trait]
 impl TextEmbedder for MockTextEmbedder {
     async fn embed_text(&self, text: &str) -> Result<Vec<f32>, InferenceError> {
@@ -20,6 +22,7 @@ impl TextEmbedder for MockTextEmbedder {
         Ok(vec)
     }
 }
+
 #[tokio::test]
 async fn test_multimodal_rag_end_to_end_pipeline() {
     let dim = 4;
@@ -87,6 +90,7 @@ async fn test_multimodal_rag_end_to_end_pipeline() {
     assert_eq!(response.visuals[0].id, "img_ferrari_red");
     assert!(response.visuals[0].is_cited);
 }
+
 #[tokio::test]
 async fn test_grouped_and_unspaced_citations() {
     let dim = 4;
@@ -133,6 +137,7 @@ async fn test_grouped_and_unspaced_citations() {
     assert_eq!(response.sources.len(), 3);
     assert!(response.sources.iter().all(|s| s.is_cited));
 }
+
 #[tokio::test]
 async fn test_numeric_footnote_disambiguation() {
     let dim = 4;
@@ -183,6 +188,7 @@ async fn test_numeric_footnote_disambiguation() {
     assert_eq!(resp_explicit.sources.len(), 1);
     assert!(resp_explicit.sources[0].is_cited);
 }
+
 #[tokio::test]
 async fn test_context_budgeting_does_not_crash_on_large_search_results() {
     let dim = 4;
@@ -216,6 +222,7 @@ async fn test_context_budgeting_does_not_crash_on_large_search_results() {
     assert!(!unwrapped.sources.is_empty());
     assert!(unwrapped.sources.len() < 12);
 }
+
 #[tokio::test]
 async fn test_custom_system_prompt_preserves_citation_instructions() {
     let dim = 4;
@@ -249,6 +256,7 @@ async fn test_custom_system_prompt_preserves_citation_instructions() {
     assert_eq!(response.sources[0].id, "doc_cited");
     assert!(response.sources[0].is_cited);
 }
+
 #[tokio::test]
 async fn test_multimodal_document_extracts_both_text_and_image() {
     let dim = 4;
@@ -294,6 +302,7 @@ async fn test_multimodal_document_extracts_both_text_and_image() {
     );
     assert!(response.visuals[0].is_cited);
 }
+
 #[tokio::test]
 async fn test_cyrillic_unicode_prompt_length_accepted() {
     let dim = 4;
@@ -317,6 +326,7 @@ async fn test_cyrillic_unicode_prompt_length_accepted() {
     let result = pipeline.answer(request).await;
     assert!(result.is_ok());
 }
+
 #[tokio::test]
 async fn test_filter_uncited_sources() {
     let dim = 4;
@@ -358,6 +368,7 @@ async fn test_filter_uncited_sources() {
     assert_eq!(response.sources.len(), 1);
     assert_eq!(response.sources[0].id, "doc_cited");
 }
+
 #[tokio::test]
 async fn test_rag_pipeline_empty_context_early_return() {
     let dim = 4;
@@ -380,6 +391,7 @@ async fn test_rag_pipeline_empty_context_early_return() {
     assert!(response.sources.is_empty());
     assert!(response.visuals.is_empty());
 }
+
 #[tokio::test]
 async fn test_rag_pipeline_prompt_too_long() {
     let dim = 4;

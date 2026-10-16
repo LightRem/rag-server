@@ -15,6 +15,7 @@ use rag_server::{
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tower::ServiceExt;
+
 fn create_test_state(config: AppConfig) -> AppState {
     let dimension = config.model.dimension;
     let embedder = Arc::new(MockEmbedder::new(dimension));
@@ -27,6 +28,7 @@ fn create_test_state(config: AppConfig) -> AppState {
     ));
     AppState::new(config, embedder, vector_store, pipeline)
 }
+
 #[tokio::test]
 async fn test_text_embedding_generation_and_l2_norm() {
     let config = AppConfig::load().expect("Config must load");
@@ -58,6 +60,7 @@ async fn test_text_embedding_generation_and_l2_norm() {
     let norm: f32 = text_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
     assert!((norm - 1.0).abs() < 1e-5, "Norm must be ~1.0, got {norm}");
 }
+
 #[tokio::test]
 async fn test_image_embedding_generation_from_raw_base64() {
     let config = AppConfig::load().expect("Config must load");
@@ -94,6 +97,7 @@ async fn test_image_embedding_generation_from_raw_base64() {
     let norm: f32 = image_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
     assert!((norm - 1.0).abs() < 1e-5);
 }
+
 #[tokio::test]
 async fn test_batch_api_endpoints() {
     let config = AppConfig::load().expect("Config must load");
@@ -139,6 +143,7 @@ async fn test_batch_api_endpoints() {
         serde_json::from_value(json["image_embeddings"].clone()).unwrap();
     assert_eq!(img_batch.len(), 2);
 }
+
 #[tokio::test]
 async fn test_mock_embedder_batch_consistency() {
     let embedder = MockEmbedder::new(128);
@@ -169,6 +174,7 @@ async fn test_mock_embedder_batch_consistency() {
     assert_eq!(img_batch.len(), 2);
     assert_eq!(img_batch[0].len(), 128);
 }
+
 #[tokio::test]
 async fn test_l2_normalization_strict_math_and_nan_rejection() {
     let mut vec = vec![3.0, 4.0];
@@ -182,6 +188,7 @@ async fn test_l2_normalization_strict_math_and_nan_rejection() {
     let mut inf_vec = vec![f32::INFINITY, 1.0];
     assert!(l2_normalize(&mut inf_vec).is_err());
 }
+
 #[tokio::test]
 async fn test_image_preprocessing_non_square_aspect_ratio() {
     let mut img = image::RgbImage::new(400, 200);
@@ -198,6 +205,7 @@ async fn test_image_preprocessing_non_square_aspect_ratio() {
     let tensor = ImagePreprocessor::preprocess(&png_bytes).expect("Preprocessing must succeed");
     assert_eq!(tensor.shape(), &[1, 3, 224, 224]);
 }
+
 #[tokio::test]
 async fn test_image_preprocessing_corrupted_payload_fails() {
     let corrupted = b"corrupted_binary_header_not_an_image";

@@ -4,6 +4,7 @@ use std::{cell::RefCell, cmp::Ordering, collections::BinaryHeap, sync::Arc};
 thread_local! {
     static VISITED_TRACKER: RefCell<(Vec<u32>, u32)> = const { RefCell::new((Vec::new(), 0)) };
 }
+
 #[derive(Debug, Clone)]
 pub struct HnswConfig {
     pub m: usize,
@@ -11,6 +12,7 @@ pub struct HnswConfig {
     pub ef_construction: usize,
     pub ef_search: usize,
 }
+
 impl Default for HnswConfig {
     fn default() -> Self {
         Self {
@@ -21,12 +23,15 @@ impl Default for HnswConfig {
         }
     }
 }
+
 #[derive(Clone, Copy, PartialEq)]
 struct Candidate {
     score: f32,
     slot: usize,
 }
+
 impl Eq for Candidate {}
+
 impl Ord for Candidate {
     fn cmp(&self, other: &Self) -> Ordering {
         self.score
@@ -34,23 +39,28 @@ impl Ord for Candidate {
             .then_with(|| other.slot.cmp(&self.slot))
     }
 }
+
 impl PartialOrd for Candidate {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
+
 #[derive(Clone, Copy)]
 struct SearchCandidate<'a> {
     score: f32,
     slot: usize,
     id: &'a str,
 }
+
 impl<'a> PartialEq for SearchCandidate<'a> {
     fn eq(&self, other: &Self) -> bool {
         self.score.total_cmp(&other.score) == Ordering::Equal && self.id == other.id
     }
 }
+
 impl<'a> Eq for SearchCandidate<'a> {}
+
 impl<'a> Ord for SearchCandidate<'a> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.score
@@ -58,21 +68,25 @@ impl<'a> Ord for SearchCandidate<'a> {
             .then_with(|| other.id.cmp(self.id))
     }
 }
+
 impl<'a> PartialOrd for SearchCandidate<'a> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
+
 #[derive(Clone, Debug, Default)]
 struct HnswNode {
     layers: Vec<Vec<usize>>,
     in_layers: Vec<Vec<usize>>,
 }
+
 #[inline]
 fn get_vector(all_vectors: &[f32], slot: usize, dim: usize) -> &[f32] {
     let start = slot * dim;
     &all_vectors[start..start + dim]
 }
+
 fn select_neighbors(
     base_vec: &[f32],
     candidate_slots: &[usize],
@@ -90,9 +104,11 @@ fn select_neighbors(
             )
         })
         .collect();
+
     scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
     let mut result: Vec<usize> = Vec::with_capacity(max_edges);
     let mut discarded: Vec<usize> = Vec::new();
+
     for (_, slot) in scored {
         if result.contains(&slot) {
             continue;
@@ -116,6 +132,7 @@ fn select_neighbors(
             discarded.push(slot);
         }
     }
+
     for slot in discarded {
         if result.len() >= max_edges {
             break;
@@ -126,6 +143,7 @@ fn select_neighbors(
     }
     result
 }
+
 pub struct HnswIndex {
     config: HnswConfig,
     nodes: Vec<HnswNode>,
@@ -133,6 +151,7 @@ pub struct HnswIndex {
     max_layer: usize,
     rng_state: u64,
 }
+
 impl HnswIndex {
     pub fn new(config: HnswConfig) -> Self {
         Self {
@@ -143,6 +162,7 @@ impl HnswIndex {
             rng_state: 0x8541_5289_4798_1253,
         }
     }
+
     fn random_level(&mut self) -> usize {
         self.rng_state ^= self.rng_state << 13;
         self.rng_state ^= self.rng_state >> 7;
@@ -152,6 +172,7 @@ impl HnswIndex {
         let lvl = (-r.ln() * mult).floor() as usize;
         lvl.min(16)
     }
+
     fn set_neighbors(&mut self, from: usize, layer: usize, new_neighbors: Vec<usize>) {
         if from >= self.nodes.len() || layer >= self.nodes[from].layers.len() {
             return;
@@ -176,6 +197,7 @@ impl HnswIndex {
             }
         }
     }
+
     pub fn remove_node_edges(&mut self, slot_idx: usize) {
         if slot_idx >= self.nodes.len() {
             return;
@@ -208,22 +230,27 @@ impl HnswIndex {
             self.max_layer = best_layer.saturating_sub(1);
         }
     }
+
     pub fn insert(&mut self, slot_idx: usize, vector: &[f32], all_vectors: &[f32], dim: usize) {
         let node_level = self.random_level();
         let new_node = HnswNode {
             layers: vec![Vec::new(); node_level + 1],
             in_layers: vec![Vec::new(); node_level + 1],
         };
+
         while self.nodes.len() <= slot_idx {
             self.nodes.push(HnswNode::default());
         }
+
         self.nodes[slot_idx] = new_node;
         let Some(mut curr_obj) = self.entry_point else {
             self.entry_point = Some(slot_idx);
             self.max_layer = node_level;
             return;
         };
+
         let mut curr_dist = dot_product(vector, get_vector(all_vectors, curr_obj, dim));
+
         for layer in (node_level + 1..=self.max_layer).rev() {
             let mut changed = true;
             while changed {
@@ -240,7 +267,9 @@ impl HnswIndex {
                 }
             }
         }
+
         let min_layer = node_level.min(self.max_layer);
+
         for layer in (0..=min_layer).rev() {
             let total_nodes = self.nodes.len();
 
@@ -251,9 +280,11 @@ impl HnswIndex {
                     visited.fill(0);
                     *cur_version = 1;
                 }
+
                 if visited.len() < total_nodes {
                     visited.resize(total_nodes, 0);
                 }
+
                 let v = *cur_version;
                 visited[curr_obj] = v;
                 let mut candidates = BinaryHeap::new();
@@ -262,10 +293,12 @@ impl HnswIndex {
                     score: curr_dist,
                     slot: curr_obj,
                 });
+
                 w.push(std::cmp::Reverse(Candidate {
                     score: curr_dist,
                     slot: curr_obj,
                 }));
+
                 while let Some(c) = candidates.pop() {
                     let worst_score = w.peek().unwrap().0.score;
                     if c.score < worst_score && w.len() >= self.config.ef_construction {
@@ -288,6 +321,7 @@ impl HnswIndex {
                         }
                     }
                 }
+
                 let slots: Vec<usize> = w
                     .into_iter()
                     .map(|rev| rev.0.slot)
@@ -296,14 +330,17 @@ impl HnswIndex {
 
                 (slots, curr_obj)
             });
+
             curr_obj = next_entry;
             let max_edges = if layer == 0 {
                 self.config.m0
             } else {
                 self.config.m
             };
+
             let chosen_neighbors =
                 select_neighbors(vector, &cand_slots, max_edges, all_vectors, dim);
+
             for &nb in &chosen_neighbors {
                 if layer < self.nodes[nb].layers.len() {
                     let mut nb_neighbors = self.nodes[nb].layers[layer].clone();
@@ -326,21 +363,25 @@ impl HnswIndex {
                     }
                 }
             }
+
             self.set_neighbors(slot_idx, layer, chosen_neighbors);
             if let Some(&best) = self.nodes[slot_idx].layers[layer].first() {
                 curr_obj = best;
                 curr_dist = dot_product(vector, get_vector(all_vectors, curr_obj, dim));
             }
         }
+
         if node_level > self.max_layer {
             self.max_layer = node_level;
             self.entry_point = Some(slot_idx);
         }
     }
+
     pub fn remove(&mut self, slot_idx: usize, last_idx: usize) {
         if slot_idx >= self.nodes.len() {
             return;
         }
+
         let entry_was_deleted = self.entry_point == Some(slot_idx);
         let entry_was_last = self.entry_point == Some(last_idx);
         self.remove_node_edges(slot_idx);
@@ -357,6 +398,7 @@ impl HnswIndex {
                         }
                     }
                 }
+
                 let out_neighbors: Vec<usize> = self.nodes[last_idx].layers[l].clone();
                 for nb in out_neighbors {
                     if nb < self.nodes.len() && l < self.nodes[nb].in_layers.len() {
@@ -370,6 +412,7 @@ impl HnswIndex {
             }
             self.nodes.swap(slot_idx, last_idx);
         }
+
         self.nodes.pop();
         if self.nodes.is_empty() {
             self.entry_point = None;
@@ -383,6 +426,7 @@ impl HnswIndex {
                     best_entry = idx;
                 }
             }
+
             if best_layer > 0 {
                 self.entry_point = Some(best_entry);
                 self.max_layer = best_layer.saturating_sub(1);
@@ -394,6 +438,7 @@ impl HnswIndex {
             self.entry_point = Some(slot_idx);
         }
     }
+
     #[allow(clippy::too_many_arguments)]
     pub fn search(
         &self,
@@ -408,6 +453,7 @@ impl HnswIndex {
         let Some(mut curr_obj) = self.entry_point else {
             return Vec::new();
         };
+
         let mut curr_dist = dot_product(query, get_vector(all_vectors, curr_obj, dim));
         for layer in (1..=self.max_layer).rev() {
             let mut changed = true;
@@ -425,6 +471,7 @@ impl HnswIndex {
                 }
             }
         }
+
         let ef = self.config.ef_search.max(limit * 4);
         let min_score = filter.as_ref().and_then(|f| f.min_score);
         let target_mod = filter.as_ref().and_then(|f| f.modality.as_ref());
@@ -438,8 +485,10 @@ impl HnswIndex {
             }
             true
         };
+
         let mut results: BinaryHeap<std::cmp::Reverse<SearchCandidate>> =
             BinaryHeap::with_capacity(limit + 1);
+
         VISITED_TRACKER.with(|tracker| {
             let (ref mut visited, ref mut cur_version) = *tracker.borrow_mut();
             *cur_version = cur_version.wrapping_add(1);
@@ -470,6 +519,7 @@ impl HnswIndex {
                     id: &ids[curr_obj],
                 }));
             }
+
             while let Some(c) = candidates.pop() {
                 if frontier.len() >= ef && frontier.peek().is_some_and(|w| c.score < w.0.score) {
                     break;
@@ -511,6 +561,7 @@ impl HnswIndex {
                 }
             }
         });
+
         let mut filtered: Vec<(f32, usize)> = results
             .into_iter()
             .map(|rev| (rev.0.score, rev.0.slot))

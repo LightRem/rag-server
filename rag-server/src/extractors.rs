@@ -4,8 +4,10 @@ use axum::{
     extract::{FromRequest, Request, rejection::JsonRejection},
     response::{IntoResponse, Response},
 };
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AppJson<T>(pub T);
+
 #[async_trait]
 impl<S, T> FromRequest<S> for AppJson<T>
 where
@@ -20,6 +22,7 @@ where
         }
     }
 }
+
 impl<T> IntoResponse for AppJson<T>
 where
     axum::Json<T>: IntoResponse,

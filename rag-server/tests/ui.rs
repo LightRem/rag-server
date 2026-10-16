@@ -2,6 +2,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode, header},
 };
+
 use http_body_util::BodyExt;
 use rag_server::{
     config::AppConfig,
@@ -11,9 +12,11 @@ use rag_server::{
     state::AppState,
     storage::InMemoryVectorStore,
 };
+
 use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
+
 fn create_test_app() -> axum::Router {
     let config = AppConfig::default();
     let embedder = Arc::new(MockEmbedder::new(config.model.dimension));
@@ -30,6 +33,7 @@ fn create_test_app() -> axum::Router {
     let state = AppState::new(config, embedder, vector_store, pipeline);
     build_router(state)
 }
+
 #[tokio::test]
 async fn test_root_serves_html_dashboard() {
     let app = create_test_app();

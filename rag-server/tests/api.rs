@@ -14,6 +14,7 @@ use rag_server::{
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tower::ServiceExt;
+
 fn create_test_app(llm_response: Option<&str>) -> axum::Router {
     let mut config = AppConfig::default();
     config.model.dimension = 4;
@@ -31,6 +32,7 @@ fn create_test_app(llm_response: Option<&str>) -> axum::Router {
     let state = AppState::new(config, embedder, vector_store, pipeline);
     build_router(state)
 }
+
 #[tokio::test]
 async fn test_api_stats_and_health() {
     let app = create_test_app(None);
@@ -54,6 +56,7 @@ async fn test_api_stats_and_health() {
     assert_eq!(json["total_documents"], 0);
     assert_eq!(json["vector_dimension"], 4);
 }
+
 #[tokio::test]
 async fn test_api_multimodal_indexing_and_rag_fusion() {
     let mock_response = "Information found in [Source ID: doc_multimodal_1] with view [Image ID: doc_multimodal_1].";
@@ -106,6 +109,7 @@ async fn test_api_multimodal_indexing_and_rag_fusion() {
     assert_eq!(visuals[0]["id"], "doc_multimodal_1");
     assert_eq!(visuals[0]["url"], "embedded://image/doc_multimodal_1");
 }
+
 #[tokio::test]
 async fn test_api_visual_search_with_image_query() {
     let app = create_test_app(None);
@@ -145,6 +149,7 @@ async fn test_api_visual_search_with_image_query() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0]["id"], "doc_visual_match");
 }
+
 #[tokio::test]
 async fn test_api_non_object_metadata_preserves_text() {
     let app = create_test_app(None);
@@ -185,6 +190,7 @@ async fn test_api_non_object_metadata_preserves_text() {
         "general_category_string"
     );
 }
+
 #[tokio::test]
 async fn test_api_ssrf_protection_blocks_loopback_and_metadata_ip() {
     let app = create_test_app(None);
@@ -239,6 +245,7 @@ async fn test_api_ssrf_protection_blocks_loopback_and_metadata_ip() {
         json2["error"]["message"]
     );
 }
+
 #[tokio::test]
 async fn test_api_batch_index_exceeds_limit() {
     let app = create_test_app(None);
@@ -259,6 +266,7 @@ async fn test_api_batch_index_exceeds_limit() {
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
+
 #[tokio::test]
 async fn test_api_delete_document() {
     let app = create_test_app(None);
@@ -289,6 +297,7 @@ async fn test_api_delete_document() {
     let stats_json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(stats_json["total_documents"], 0);
 }
+
 #[tokio::test]
 async fn test_api_ssrf_protection_blocks_ipv4_mapped_ipv6() {
     let app = create_test_app(None);

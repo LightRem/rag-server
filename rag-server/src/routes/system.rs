@@ -2,6 +2,7 @@ use super::models::{EmbeddingsRequest, MAX_BATCH_SIZE, StatsResponse};
 use crate::{domain::ImageSource, error::ApiError, extractors::AppJson, state::AppState};
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde_json::json;
+
 pub async fn health_check_handler() -> impl IntoResponse {
     (
         StatusCode::OK,
@@ -11,6 +12,7 @@ pub async fn health_check_handler() -> impl IntoResponse {
         })),
     )
 }
+
 pub async fn validate_payload_handler(
     State(state): State<AppState>,
     AppJson(payload): AppJson<EmbeddingsRequest>,
@@ -23,6 +25,7 @@ pub async fn validate_payload_handler(
             "Payload must contain at least one text or image field".into(),
         ));
     }
+
     if let Some(texts) = payload.texts.as_ref().filter(|t| t.len() > MAX_BATCH_SIZE) {
         return Err(ApiError::ValidationError(format!(
             "Batch size {} exceeds maximum allowed limit of {} items",
@@ -30,6 +33,7 @@ pub async fn validate_payload_handler(
             MAX_BATCH_SIZE
         )));
     }
+
     if let Some(images) = payload.images.as_ref().filter(|i| i.len() > MAX_BATCH_SIZE) {
         return Err(ApiError::ValidationError(format!(
             "Batch size {} exceeds maximum allowed limit of {} items",
@@ -37,11 +41,13 @@ pub async fn validate_payload_handler(
             MAX_BATCH_SIZE
         )));
     }
+
     let allowed_root = state.uploads_dir();
     if let Some(img @ ImageSource::Path(_)) = &payload.image {
         img.validate_safe_path(allowed_root)
             .map_err(ApiError::ValidationError)?;
     }
+
     if let Some(ref images) = payload.images {
         for img in images {
             if matches!(img, ImageSource::Path(_)) {
@@ -50,6 +56,7 @@ pub async fn validate_payload_handler(
             }
         }
     }
+
     Ok((
         StatusCode::OK,
         Json(json!({
@@ -59,6 +66,7 @@ pub async fn validate_payload_handler(
         })),
     ))
 }
+
 pub async fn get_stats_handler(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, ApiError> {

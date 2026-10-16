@@ -14,12 +14,14 @@ pub async fn generate_embeddings_handler(
         image_embedding: None,
         image_embeddings: None,
     };
+
     let mut processed_anything = false;
     if let Some(text) = payload.text {
         let vec = embedder.embed_text(&text).await?;
         response.text_embedding = Some(vec);
         processed_anything = true;
     }
+
     if let Some(texts) = payload.texts.filter(|t| !t.is_empty()) {
         if texts.len() > MAX_BATCH_SIZE {
             return Err(ApiError::ValidationError(format!(
@@ -33,6 +35,7 @@ pub async fn generate_embeddings_handler(
         response.text_embeddings = Some(batch);
         processed_anything = true;
     }
+
     let allowed_root = state.uploads_dir();
     let max_image_bytes = state.config().server.max_body_limit_mb * 1024 * 1024;
     if let Some(img_source) = payload.image {
@@ -47,6 +50,7 @@ pub async fn generate_embeddings_handler(
         response.image_embedding = Some(vec);
         processed_anything = true;
     }
+
     if let Some(images) = payload.images.filter(|i| !i.is_empty()) {
         if images.len() > MAX_BATCH_SIZE {
             return Err(ApiError::ValidationError(format!(
@@ -66,6 +70,7 @@ pub async fn generate_embeddings_handler(
         response.image_embeddings = Some(batch);
         processed_anything = true;
     }
+
     if !processed_anything {
         return Err(ApiError::ValidationError(
             "Request must contain at least one non-empty text or image input".into(),

@@ -5,6 +5,7 @@ use rag_server::{
 };
 use serde_json::json;
 use std::f32::consts::FRAC_1_SQRT_2;
+
 #[tokio::test]
 async fn test_insert_and_get() {
     let store = InMemoryVectorStore::new(4);
@@ -22,6 +23,7 @@ async fn test_insert_and_get() {
     assert_eq!(unwrapped.id, "doc1");
     assert_eq!(unwrapped.payload["title"], "multimodal article");
 }
+
 #[tokio::test]
 async fn test_dimension_mismatch_and_zero_dimension_rejected() {
     let store = InMemoryVectorStore::new(4);
@@ -48,6 +50,7 @@ async fn test_dimension_mismatch_and_zero_dimension_rejected() {
         .await;
     assert!(matches!(zero_res, Err(StorageError::InvalidVector(_))));
 }
+
 #[tokio::test]
 async fn test_nan_infinity_zero_and_unnormalized_vectors_rejected() {
     let store = InMemoryVectorStore::new(3);
@@ -100,6 +103,7 @@ async fn test_nan_infinity_zero_and_unnormalized_vectors_rejected() {
         Err(StorageError::InvalidVector(_))
     ));
 }
+
 #[tokio::test]
 async fn test_filter_min_score_range_validation() {
     let store = InMemoryVectorStore::new(2);
@@ -119,6 +123,7 @@ async fn test_filter_min_score_range_validation() {
         Err(StorageError::InvalidFilter(_))
     ));
 }
+
 #[tokio::test]
 async fn test_capacity_exceeded_error_returned() {
     let store = InMemoryVectorStore::with_capacity(2, 2);
@@ -174,6 +179,7 @@ async fn test_capacity_exceeded_error_returned() {
     assert!(update_res.is_ok());
     assert_eq!(store.count().await.unwrap(), 2);
 }
+
 #[tokio::test]
 async fn test_top_k_cosine_search_ranking_and_filtering() {
     let store = InMemoryVectorStore::new(2);
@@ -217,6 +223,7 @@ async fn test_top_k_cosine_search_ranking_and_filtering() {
     assert_eq!(high_score_results.len(), 1);
     assert_eq!(high_score_results[0].id, "p_exact");
 }
+
 #[tokio::test]
 async fn test_deterministic_tie_breaking_on_equal_scores() {
     let store = InMemoryVectorStore::new(2);
@@ -234,6 +241,7 @@ async fn test_deterministic_tie_breaking_on_equal_scores() {
     assert_eq!(results[1].id, "doc_b");
     assert_eq!(results[2].id, "doc_c");
 }
+
 #[tokio::test]
 async fn test_hnsw_scale_search_accuracy() {
     let dim = 16;
@@ -296,6 +304,7 @@ async fn test_hnsw_scale_search_accuracy() {
     assert_eq!(results[1].id, "winner_2");
     assert!((results[1].score - 0.8).abs() < 1e-4);
 }
+
 #[tokio::test]
 async fn test_hnsw_upsert_entry_point_preserves_graph_connectivity() {
     let dim = 16;
@@ -365,6 +374,7 @@ async fn test_hnsw_upsert_entry_point_preserves_graph_connectivity() {
     let results_other = store.search(&initial_vec, 3, None).await.unwrap();
     assert!(!results_other.is_empty());
 }
+
 #[tokio::test]
 async fn test_hnsw_search_after_deletions_no_panic() {
     let dim = 8;
@@ -395,6 +405,7 @@ async fn test_hnsw_search_after_deletions_no_panic() {
             .all(|r| r.id != "node_000" && r.id != "node_075" && r.id != "node_149")
     );
 }
+
 #[tokio::test]
 async fn test_hnsw_in_search_filtering_rare_modality() {
     let dim = 8;
@@ -431,6 +442,7 @@ async fn test_hnsw_in_search_filtering_rare_modality() {
     assert_eq!(results.len(), 2);
     assert!(results.iter().all(|r| r.modality == Modality::Image));
 }
+
 #[tokio::test]
 async fn test_delete_swap_remove_and_upsert_integrity() {
     let store = InMemoryVectorStore::new(3);
@@ -473,6 +485,7 @@ async fn test_delete_swap_remove_and_upsert_integrity() {
     assert_eq!(updated_mid.payload["v"], 22);
     assert_eq!(updated_mid.modality, Modality::Multimodal);
 }
+
 #[tokio::test]
 async fn test_huge_limit_does_not_overflow_or_oom() {
     let store = InMemoryVectorStore::new(2);

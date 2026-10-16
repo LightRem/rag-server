@@ -3,7 +3,9 @@ pub mod embeddings;
 pub mod media;
 pub mod models;
 pub mod search;
+pub mod security;
 pub mod system;
+
 use crate::state::AppState;
 use axum::{
     Router,
@@ -12,9 +14,11 @@ use axum::{
 };
 pub use models::MAX_BATCH_SIZE;
 use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
+
 async fn index_page_handler() -> Html<&'static str> {
     Html(include_str!("../../static/index.html"))
 }
+
 pub fn build_router(state: AppState) -> Router {
     let max_body_bytes = state.config().server.max_body_limit_mb * 1024 * 1024;
     Router::new()

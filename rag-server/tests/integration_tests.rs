@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tower::ServiceExt;
+
 fn create_test_state(config: AppConfig) -> AppState {
     let embedder = Arc::new(MockEmbedder::new(config.model.dimension));
     let vector_store = Arc::new(InMemoryVectorStore::new(config.model.dimension));
@@ -30,6 +31,7 @@ fn create_test_state(config: AppConfig) -> AppState {
     ));
     AppState::new(config, embedder, vector_store, pipeline)
 }
+
 #[tokio::test]
 async fn test_health_check_end_to_end() {
     let config = AppConfig::load().expect("Config must load");
@@ -51,6 +53,7 @@ async fn test_health_check_end_to_end() {
     assert_eq!(json["status"], "healthy");
     assert_eq!(json["service"], "multimodal-rag-server");
 }
+
 #[tokio::test]
 async fn test_payload_validation_http_success() {
     let config = AppConfig::load().expect("Config must load");
@@ -77,6 +80,7 @@ async fn test_payload_validation_http_success() {
     assert_eq!(json["status"], "valid");
     assert_eq!(json["has_text"], true);
 }
+
 #[tokio::test]
 async fn test_payload_validation_http_malformed_json_returns_json_error() {
     let config = AppConfig::load().expect("Config must load");
@@ -99,6 +103,7 @@ async fn test_payload_validation_http_malformed_json_returns_json_error() {
     assert!(json.get("error").is_some());
     assert_eq!(json["error"]["status_code"], 400);
 }
+
 #[tokio::test]
 async fn test_payload_validation_http_unsupported_mime_type() {
     let config = AppConfig::load().expect("Config must load");
@@ -135,6 +140,7 @@ async fn test_payload_validation_http_unsupported_mime_type() {
             .contains("Unsupported MIME type")
     );
 }
+
 #[tokio::test]
 async fn test_config_validation_rejects_zero_port() {
     let mut config = AppConfig::default();
@@ -152,6 +158,7 @@ async fn test_config_validation_rejects_zero_port() {
     };
     assert!(valid_config.validate().is_ok());
 }
+
 #[tokio::test]
 async fn test_path_traversal_protection_comprehensive() {
     let timestamp = SystemTime::now()

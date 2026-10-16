@@ -5,6 +5,7 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ServerConfig {
     pub host: String,
@@ -13,6 +14,7 @@ pub struct ServerConfig {
     pub snapshot_path: PathBuf,
     pub snapshot_interval_secs: u64,
 }
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -24,6 +26,7 @@ impl Default for ServerConfig {
         }
     }
 }
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ModelConfig {
     pub text_model_path: PathBuf,
@@ -32,6 +35,7 @@ pub struct ModelConfig {
     pub max_concurrency: usize,
     pub dimension: usize,
 }
+
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
@@ -43,6 +47,7 @@ impl Default for ModelConfig {
         }
     }
 }
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LlmConfig {
     pub endpoint: String,
@@ -50,6 +55,7 @@ pub struct LlmConfig {
     pub api_key: Option<String>,
     pub timeout_secs: u64,
 }
+
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
@@ -60,6 +66,7 @@ impl Default for LlmConfig {
         }
     }
 }
+
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum LogFormat {
@@ -67,12 +74,14 @@ pub enum LogFormat {
     Pretty,
     Json,
 }
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LoggingConfig {
     pub level: String,
     pub format: LogFormat,
     pub file_path: Option<PathBuf>,
 }
+
 impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
@@ -82,6 +91,7 @@ impl Default for LoggingConfig {
         }
     }
 }
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct AppConfig {
     pub server: ServerConfig,
@@ -89,6 +99,7 @@ pub struct AppConfig {
     pub llm: LlmConfig,
     pub logging: LoggingConfig,
 }
+
 impl AppConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.server.port == 0 {
@@ -97,36 +108,42 @@ impl AppConfig {
                 reason: "Port must be greater than 0".to_string(),
             });
         }
+
         if self.server.max_body_limit_mb == 0 {
             return Err(ConfigError::InvalidParameter {
                 field: "server.max_body_limit_mb",
                 reason: "Maximum body limit must be greater than 0 MB".to_string(),
             });
         }
+
         if self.server.snapshot_path.as_os_str().is_empty() {
             return Err(ConfigError::InvalidParameter {
                 field: "server.snapshot_path",
                 reason: "Snapshot path cannot be empty".to_string(),
             });
         }
+
         if self.model.max_concurrency == 0 {
             return Err(ConfigError::InvalidParameter {
                 field: "model.max_concurrency",
                 reason: "Max concurrency must be at least 1".to_string(),
             });
         }
+
         if self.model.dimension == 0 {
             return Err(ConfigError::InvalidParameter {
                 field: "model.dimension",
                 reason: "Model dimension must be greater than 0".to_string(),
             });
         }
+
         if self.llm.endpoint.trim().is_empty() {
             return Err(ConfigError::InvalidParameter {
                 field: "llm.endpoint",
                 reason: "LLM endpoint cannot be empty".to_string(),
             });
         }
+
         if self.llm.timeout_secs == 0 {
             return Err(ConfigError::InvalidParameter {
                 field: "llm.timeout_secs",
@@ -135,16 +152,19 @@ impl AppConfig {
         }
         Ok(())
     }
+
     pub fn load() -> Result<Self, ConfigError> {
         let mut figment = Figment::new().merge(Serialized::defaults(AppConfig::default()));
         let default_config_path = Path::new("config/default.toml");
         if default_config_path.exists() {
             figment = figment.merge(Toml::file(default_config_path).nested());
         }
+
         let local_config_path = Path::new("config/local.toml");
         if local_config_path.exists() {
             figment = figment.merge(Toml::file(local_config_path).nested());
         }
+
         let config: AppConfig = figment
             .merge(Env::prefixed("RAG_").split("__"))
             .extract()

@@ -3,13 +3,16 @@ use image::imageops::FilterType;
 use ndarray::{Array2, Array4};
 use rayon::prelude::*;
 use tokenizers::Tokenizer;
+
 pub const CLIP_IMAGE_SIZE: usize = 224;
 pub const CLIP_TEXT_SEQ_LEN: usize = 77;
 pub const CLIP_EOT_TOKEN_ID: i64 = 49407;
 const CLIP_MEAN: [f32; 3] = [0.48145466, 0.4578275, 0.40821073];
 #[allow(clippy::excessive_precision)]
 const CLIP_STD: [f32; 3] = [0.26862954, 0.26130258, 0.27577711];
+
 pub struct ImagePreprocessor;
+
 impl ImagePreprocessor {
     pub fn preprocess(bytes: &[u8]) -> Result<Array4<f32>, InferenceError> {
         Self::preprocess_batch(&[bytes])
@@ -19,11 +22,13 @@ impl ImagePreprocessor {
             reason: e.to_string(),
             mime_type: None,
         })?;
+
         let processed = img.resize_to_fill(
             CLIP_IMAGE_SIZE as u32,
             CLIP_IMAGE_SIZE as u32,
             FilterType::CatmullRom,
         );
+
         let rgb_img = processed.to_rgb8();
         let raw_bytes = rgb_img.as_raw();
         let num_pixels = CLIP_IMAGE_SIZE * CLIP_IMAGE_SIZE;
@@ -36,6 +41,7 @@ impl ImagePreprocessor {
         }
         Ok(())
     }
+
     pub fn preprocess_batch(images: &[&[u8]]) -> Result<Array4<f32>, InferenceError> {
         let batch_size = images.len();
         if batch_size == 0 {
@@ -43,6 +49,7 @@ impl ImagePreprocessor {
                 "Empty image batch provided".into(),
             ));
         }
+
         let num_pixels = CLIP_IMAGE_SIZE * CLIP_IMAGE_SIZE;
         let image_element_count = 3 * num_pixels;
         let mut flat_data = vec![0.0f32; batch_size * image_element_count];
@@ -54,7 +61,9 @@ impl ImagePreprocessor {
             .map_err(|e| InferenceError::Preprocessing(e.to_string()))
     }
 }
+
 pub struct TextPreprocessor;
+
 impl TextPreprocessor {
     pub fn preprocess_single(
         tokenizer: &Tokenizer,
@@ -62,6 +71,7 @@ impl TextPreprocessor {
     ) -> Result<Array2<i64>, InferenceError> {
         Self::preprocess_batch(tokenizer, &[text])
     }
+
     pub fn preprocess_batch(
         tokenizer: &Tokenizer,
         texts: &[&str],

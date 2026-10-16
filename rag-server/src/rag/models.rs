@@ -14,12 +14,15 @@ pub struct RagQueryRequest {
     pub temperature: Option<f32>,
     pub max_tokens: Option<usize>,
 }
+
 fn default_top_k() -> usize {
     5
 }
+
 fn default_min_score() -> f32 {
     0.20
 }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SourceReference {
     pub id: String,
@@ -29,6 +32,7 @@ pub struct SourceReference {
     #[serde(default)]
     pub is_cited: bool,
 }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VisualReference {
     pub id: String,
@@ -38,6 +42,7 @@ pub struct VisualReference {
     #[serde(default)]
     pub is_cited: bool,
 }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RagQueryResponse {
     pub query: String,
