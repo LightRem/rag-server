@@ -1,7 +1,7 @@
 use super::models::IndexDocumentRequest;
 use super::security::fetch_safe_remote_image;
 use crate::{
-    domain::{ImageSource, Modality},
+    domain::{ImageSource, Modality, RawImageData},
     error::ApiError,
     state::AppState,
     storage::VectorPoint,
@@ -37,11 +37,80 @@ fn build_document_payload(
     payload
 }
 
-fn resolve_image_url_hint(image_source: &ImageSource, doc_id: &str) -> Option<String> {
+fn extract_clip_caption(title: Option<&str>, text: &str) -> String {
+    let first_sentence = text
+        .split(['\n', '.', '!', '?'])
+        .map(|s| s.trim())
+        .find(|s| s.len() >= 10)
+        .unwrap_or(text);
+
+    match title {
+        Some(t) if !t.trim().is_empty() => {
+            let clean_t = t.trim();
+            if first_sentence
+                .to_lowercase()
+                .starts_with(&clean_t.to_lowercase())
+            {
+                first_sentence.to_string()
+            } else {
+                format!("{clean_t}: {first_sentence}")
+            }
+        }
+        _ => first_sentence.to_string(),
+    }
+}
+
+fn ext_from_mime(mime: &str) -> &'static str {
+    match mime {
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "jpg",
+    }
+}
+
+async fn save_raw_image_to_disk(
+    raw: &RawImageData,
+    doc_id: &str,
+    allowed_root: &Path,
+) -> Result<String, ApiError> {
+    tokio::fs::create_dir_all(allowed_root)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to create uploads directory: {e}")))?;
+
+    let ext = ext_from_mime(&raw.mime_type);
+    let safe_id: String = doc_id
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let filename = format!("{safe_id}.{ext}");
+    let file_path = allowed_root.join(&filename);
+
+    tokio::fs::write(&file_path, &raw.bytes)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to persist uploaded image: {e}")))?;
+
+    Ok(format!("/uploads/{filename}"))
+}
+
+async fn resolve_image_url(
+    image_source: &ImageSource,
+    doc_id: &str,
+    allowed_root: &Path,
+) -> Result<Option<String>, ApiError> {
     match image_source {
-        ImageSource::Url(u) => Some(u.clone()),
-        ImageSource::Path(p) => Some(format!("file://{}", p.display())),
-        ImageSource::Raw(_) => Some(format!("embedded://image/{}", doc_id)),
+        ImageSource::Url(u) => Ok(Some(u.clone())),
+        ImageSource::Path(p) => Ok(Some(format!("file://{}", p.display()))),
+        ImageSource::Raw(raw) => {
+            let web_url = save_raw_image_to_disk(raw, doc_id, allowed_root).await?;
+            Ok(Some(web_url))
+        }
     }
 }
 
@@ -90,7 +159,6 @@ pub async fn load_image_bytes(
     source: &ImageSource,
     allowed_root: &Path,
     max_allowed_bytes: usize,
-    _http_client: &reqwest::Client,
 ) -> Result<Bytes, ApiError> {
     match source {
         ImageSource::Raw(raw) => Ok(raw.bytes.clone()),
@@ -121,20 +189,15 @@ pub async fn prepare_single_point(
     }
 
     let allowed_root = state.uploads_dir();
-    let max_image_bytes = state.config().server.max_body_limit_mb * 1024 * 1024;
+    let max_image_bytes = state.config().server.max_body_limit_bytes();
 
     match (doc.text, doc.image) {
         (Some(text), Some(image_source)) => {
-            let image_url = resolve_image_url_hint(&image_source, doc_id);
-            let bytes = load_image_bytes(
-                &image_source,
-                allowed_root,
-                max_image_bytes,
-                state.http_client(),
-            )
-            .await?;
+            let image_url = resolve_image_url(&image_source, doc_id, allowed_root).await?;
+            let bytes = load_image_bytes(&image_source, allowed_root, max_image_bytes).await?;
 
-            let text_vec = state.embedder().embed_text(&text).await?;
+            let clip_caption = extract_clip_caption(doc.title.as_deref(), &text);
+            let text_vec = state.embedder().embed_text(&clip_caption).await?;
             let img_vec = state.embedder().embed_image(&bytes).await?;
             let payload = build_document_payload(doc.metadata, doc.title, Some(text), image_url);
 
@@ -144,19 +207,14 @@ pub async fn prepare_single_point(
             )
         }
         (Some(text), None) => {
-            let vec = state.embedder().embed_text(&text).await?;
+            let clip_caption = extract_clip_caption(doc.title.as_deref(), &text);
+            let vec = state.embedder().embed_text(&clip_caption).await?;
             let payload = build_document_payload(doc.metadata, doc.title, Some(text), None);
             Ok(VectorPoint::new(doc_id, vec, payload, Modality::Text))
         }
         (None, Some(image_source)) => {
-            let image_url = resolve_image_url_hint(&image_source, doc_id);
-            let bytes = load_image_bytes(
-                &image_source,
-                allowed_root,
-                max_image_bytes,
-                state.http_client(),
-            )
-            .await?;
+            let image_url = resolve_image_url(&image_source, doc_id, allowed_root).await?;
+            let bytes = load_image_bytes(&image_source, allowed_root, max_image_bytes).await?;
 
             let vec = state.embedder().embed_image(&bytes).await?;
             let fallback_text = doc.title.as_deref().unwrap_or(doc_id);

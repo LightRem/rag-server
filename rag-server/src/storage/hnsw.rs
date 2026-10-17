@@ -1,8 +1,16 @@
 use super::{dot_product, models::SearchFilter};
 use crate::domain::Modality;
 use std::{cell::RefCell, cmp::Ordering, collections::BinaryHeap, sync::Arc};
+
 thread_local! {
     static VISITED_TRACKER: RefCell<(Vec<u32>, u32)> = const { RefCell::new((Vec::new(), 0)) };
+}
+
+pub struct VectorView<'a> {
+    pub vectors: &'a [f32],
+    pub ids: &'a [Arc<str>],
+    pub modalities: &'a [Modality],
+    pub dim: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -439,29 +447,25 @@ impl HnswIndex {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn search(
         &self,
         query: &[f32],
         limit: usize,
-        all_vectors: &[f32],
-        modalities: &[Modality],
-        ids: &[Arc<str>],
-        dim: usize,
-        filter: &Option<SearchFilter>,
+        view: &VectorView<'_>,
+        filter: Option<&SearchFilter>,
     ) -> Vec<(f32, usize)> {
         let Some(mut curr_obj) = self.entry_point else {
             return Vec::new();
         };
 
-        let mut curr_dist = dot_product(query, get_vector(all_vectors, curr_obj, dim));
+        let mut curr_dist = dot_product(query, get_vector(view.vectors, curr_obj, view.dim));
         for layer in (1..=self.max_layer).rev() {
             let mut changed = true;
             while changed {
                 changed = false;
                 if layer < self.nodes[curr_obj].layers.len() {
                     for &nb in &self.nodes[curr_obj].layers[layer] {
-                        let d = dot_product(query, get_vector(all_vectors, nb, dim));
+                        let d = dot_product(query, get_vector(view.vectors, nb, view.dim));
                         if d > curr_dist {
                             curr_dist = d;
                             curr_obj = nb;
@@ -473,11 +477,11 @@ impl HnswIndex {
         }
 
         let ef = self.config.ef_search.max(limit * 4);
-        let min_score = filter.as_ref().and_then(|f| f.min_score);
-        let target_mod = filter.as_ref().and_then(|f| f.modality.as_ref());
+        let min_score = filter.and_then(|f| f.min_score);
+        let target_mod = filter.and_then(|f| f.modality.as_ref());
         let total_nodes = self.nodes.len();
         let matches_filter = |slot: usize, score: f32| -> bool {
-            if target_mod.is_some_and(|m| &modalities[slot] != m) {
+            if target_mod.is_some_and(|m| &view.modalities[slot] != m) {
                 return false;
             }
             if min_score.is_some_and(|min| score < min) {
@@ -516,7 +520,7 @@ impl HnswIndex {
                 results.push(std::cmp::Reverse(SearchCandidate {
                     score: curr_dist,
                     slot: curr_obj,
-                    id: &ids[curr_obj],
+                    id: &view.ids[curr_obj],
                 }));
             }
 
@@ -528,7 +532,7 @@ impl HnswIndex {
                     for &nb in &self.nodes[c.slot].layers[0] {
                         if visited[nb] != v {
                             visited[nb] = v;
-                            let score = dot_product(query, get_vector(all_vectors, nb, dim));
+                            let score = dot_product(query, get_vector(view.vectors, nb, view.dim));
                             let worst_frontier_score = frontier
                                 .peek()
                                 .map(|x| x.0.score)
@@ -544,7 +548,7 @@ impl HnswIndex {
                                 let cand = SearchCandidate {
                                     score,
                                     slot: nb,
-                                    id: &ids[nb],
+                                    id: &view.ids[nb],
                                 };
                                 if results.len() < limit {
                                     results.push(std::cmp::Reverse(cand));
@@ -566,7 +570,10 @@ impl HnswIndex {
             .into_iter()
             .map(|rev| (rev.0.score, rev.0.slot))
             .collect();
-        filtered.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then_with(|| ids[a.1].cmp(&ids[b.1])));
+        filtered.sort_unstable_by(|a, b| {
+            b.0.total_cmp(&a.0)
+                .then_with(|| view.ids[a.1].cmp(&view.ids[b.1]))
+        });
         filtered
     }
 }

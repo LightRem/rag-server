@@ -38,23 +38,15 @@ pub enum InferenceError {
         actual: Vec<usize>,
     },
 
-    #[error("Inference session pool exhausted or unavailable: {0}")]
-    PoolExhausted(String),
-
     #[error("Inference execution timed out: {0}")]
     Timeout(String),
 
     #[error("Runtime inference failure: {0}")]
     Execution(String),
 }
+
 #[derive(Error, Debug)]
 pub enum StorageError {
-    #[error("Database connection refused at address: {endpoint}")]
-    ConnectionRefused { endpoint: String },
-
-    #[error("Collection '{collection}' not found")]
-    CollectionNotFound { collection: String },
-
     #[error("Document with id '{id}' not found")]
     DocumentNotFound { id: String },
 
@@ -82,6 +74,7 @@ pub enum StorageError {
     #[error("Database operation failed: {0}")]
     Internal(String),
 }
+
 #[derive(Error, Debug)]
 pub enum GenerationError {
     #[error("LLM upstream request failed: {0}")]
@@ -99,6 +92,22 @@ pub enum GenerationError {
     #[error("LLM returned an empty response")]
     EmptyResponse,
 }
+
+#[derive(Error, Debug)]
+pub enum RagError {
+    #[error("Validation error: {0}")]
+    ValidationError(String),
+
+    #[error(transparent)]
+    Inference(#[from] InferenceError),
+
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+
+    #[error(transparent)]
+    Generation(#[from] GenerationError),
+}
+
 #[derive(Error, Debug)]
 pub enum ApiError {
     #[error("Internal server error: {0}")]
@@ -115,6 +124,9 @@ pub enum ApiError {
 
     #[error(transparent)]
     Generation(#[from] GenerationError),
+
+    #[error(transparent)]
+    Rag(#[from] RagError),
 
     #[error("Payload validation failed: {0}")]
     ValidationError(String),
@@ -137,18 +149,26 @@ pub enum ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, client_message) = match &self {
-            ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
-            ApiError::ValidationError(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+        let (status, client_message) = match self {
+            ApiError::Rag(rag_err) => match rag_err {
+                RagError::ValidationError(msg) => (StatusCode::BAD_REQUEST, msg),
+                RagError::Inference(e) => return ApiError::Inference(e).into_response(),
+                RagError::Storage(e) => return ApiError::Storage(e).into_response(),
+                RagError::Generation(e) => return ApiError::Generation(e).into_response(),
+            },
+
+            ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
+            ApiError::ValidationError(msg) => (StatusCode::BAD_REQUEST, msg),
             ApiError::PayloadTooLarge { size, max_allowed } => (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 format!("Payload size {size} bytes exceeds limit of {max_allowed} bytes"),
             ),
 
-            ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
-            ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
-            ApiError::TooManyRequests(msg) => (StatusCode::TOO_MANY_REQUESTS, msg.clone()),
-            ApiError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg.clone()),
+            ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg),
+            ApiError::TooManyRequests(msg) => (StatusCode::TOO_MANY_REQUESTS, msg),
+            ApiError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg),
+
             ApiError::Inference(InferenceError::Preprocessing(reason)) => (
                 StatusCode::BAD_REQUEST,
                 format!("Input preprocessing error: {reason}"),
@@ -162,11 +182,6 @@ impl IntoResponse for ApiError {
             ApiError::Inference(InferenceError::TensorShapeMismatch { .. }) => (
                 StatusCode::BAD_REQUEST,
                 "Input dimensions are invalid".to_string(),
-            ),
-
-            ApiError::Inference(InferenceError::PoolExhausted(reason)) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("Inference pool busy: {reason}"),
             ),
 
             ApiError::Inference(InferenceError::Timeout(reason)) => (
@@ -193,11 +208,6 @@ impl IntoResponse for ApiError {
                 format!("Document serialization failed: {reason}"),
             ),
 
-            ApiError::Storage(StorageError::CollectionNotFound { collection }) => (
-                StatusCode::NOT_FOUND,
-                format!("Collection '{collection}' not found"),
-            ),
-
             ApiError::Storage(StorageError::DocumentNotFound { id }) => {
                 (StatusCode::NOT_FOUND, format!("Document '{id}' not found"))
             }
@@ -209,11 +219,6 @@ impl IntoResponse for ApiError {
             ApiError::Storage(StorageError::CapacityExceeded { current, max }) => (
                 StatusCode::INSUFFICIENT_STORAGE,
                 format!("Storage capacity limit reached ({current}/{max})"),
-            ),
-
-            ApiError::Storage(StorageError::ConnectionRefused { .. }) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Vector storage backend is temporarily unavailable".to_string(),
             ),
 
             ApiError::Storage(StorageError::Timeout(reason)) => (

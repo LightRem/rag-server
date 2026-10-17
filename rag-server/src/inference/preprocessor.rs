@@ -17,6 +17,7 @@ impl ImagePreprocessor {
     pub fn preprocess(bytes: &[u8]) -> Result<Array4<f32>, InferenceError> {
         Self::preprocess_batch(&[bytes])
     }
+
     fn process_single_image(bytes: &[u8], out_slice: &mut [f32]) -> Result<(), InferenceError> {
         let img = image::load_from_memory(bytes).map_err(|e| InferenceError::ImageDecode {
             reason: e.to_string(),
@@ -86,6 +87,7 @@ impl TextPreprocessor {
             .map_err(|e| InferenceError::Preprocessing(e.to_string()))?;
         let batch_size = texts.len();
         let mut flat_data = vec![CLIP_EOT_TOKEN_ID; batch_size * CLIP_TEXT_SEQ_LEN];
+
         for (b, encoding) in encodings.iter().enumerate() {
             let ids = encoding.get_ids();
             let dest_offset = b * CLIP_TEXT_SEQ_LEN;
@@ -93,7 +95,15 @@ impl TextPreprocessor {
             for (i, &id) in ids[..copy_len].iter().enumerate() {
                 flat_data[dest_offset + i] = id as i64;
             }
+
+            let chunk = &mut flat_data[dest_offset..dest_offset + CLIP_TEXT_SEQ_LEN];
+            if !chunk.contains(&CLIP_EOT_TOKEN_ID)
+                && let Some(last) = chunk.last_mut()
+            {
+                *last = CLIP_EOT_TOKEN_ID;
+            }
         }
+
         Array2::from_shape_vec((batch_size, CLIP_TEXT_SEQ_LEN), flat_data)
             .map_err(|e| InferenceError::Preprocessing(e.to_string()))
     }

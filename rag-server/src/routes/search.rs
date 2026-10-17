@@ -36,17 +36,11 @@ pub async fn search_documents_handler(
     }
 
     let allowed_root = state.uploads_dir();
-    let max_image_bytes = state.config().server.max_body_limit_mb * 1024 * 1024;
+    let max_image_bytes = state.config().server.max_body_limit_bytes();
 
     let (query_vector, query_modality) = match (query_trimmed, payload.image.as_ref()) {
         (Some(text), Some(img_source)) => {
-            let bytes = load_image_bytes(
-                img_source,
-                allowed_root,
-                max_image_bytes,
-                state.http_client(),
-            )
-            .await?;
+            let bytes = load_image_bytes(img_source, allowed_root, max_image_bytes).await?;
             let text_vec = state.embedder().embed_text(text).await?;
             let img_vec = state.embedder().embed_image(&bytes).await?;
             let fused = fuse_query_vectors(&text_vec, &img_vec)?;
@@ -54,13 +48,7 @@ pub async fn search_documents_handler(
         }
         (Some(text), None) => (state.embedder().embed_text(text).await?, Modality::Text),
         (None, Some(img_source)) => {
-            let bytes = load_image_bytes(
-                img_source,
-                allowed_root,
-                max_image_bytes,
-                state.http_client(),
-            )
-            .await?;
+            let bytes = load_image_bytes(img_source, allowed_root, max_image_bytes).await?;
             (state.embedder().embed_image(&bytes).await?, Modality::Image)
         }
         (None, None) => unreachable!(),

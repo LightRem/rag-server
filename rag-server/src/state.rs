@@ -29,11 +29,12 @@ impl AppState {
 
         let _ = std::fs::create_dir_all(&uploads_dir);
         let canonical_uploads_dir = uploads_dir.canonicalize().unwrap_or(uploads_dir);
+
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .unwrap_or_default();
+            .expect("Failed to build HTTP client with custom timeout and redirect policy");
 
         Self {
             config: Arc::new(config),

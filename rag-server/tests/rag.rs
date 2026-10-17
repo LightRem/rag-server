@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use rag_server::{
     domain::Modality,
-    error::{ApiError, GenerationError, InferenceError},
+    error::{GenerationError, InferenceError, RagError},
     rag::{MAX_PROMPT_CHARS, MockLlmClient, RagPipeline, RagQueryRequest, TextEmbedder},
     storage::{InMemoryVectorStore, VectorPoint, VectorStore},
 };
@@ -413,9 +413,10 @@ async fn test_rag_pipeline_prompt_too_long() {
     let result = pipeline.answer(request).await;
     assert!(matches!(
         result,
-        Err(ApiError::Generation(GenerationError::PromptTooLong { .. }))
+        Err(RagError::Generation(GenerationError::PromptTooLong { .. }))
     ));
 }
+
 #[tokio::test]
 async fn test_rag_pipeline_rejects_empty_query() {
     let dim = 4;
@@ -434,5 +435,5 @@ async fn test_rag_pipeline_rejects_empty_query() {
         max_tokens: None,
     };
     let result = pipeline.answer(request).await;
-    assert!(matches!(result, Err(ApiError::ValidationError(_))));
+    assert!(matches!(result, Err(RagError::ValidationError(_))));
 }

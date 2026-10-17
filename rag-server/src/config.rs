@@ -15,6 +15,12 @@ pub struct ServerConfig {
     pub snapshot_interval_secs: u64,
 }
 
+impl ServerConfig {
+    pub fn max_body_limit_bytes(&self) -> usize {
+        self.max_body_limit_mb * 1024 * 1024
+    }
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -150,6 +156,7 @@ impl AppConfig {
                 reason: "LLM timeout must be greater than 0 seconds".to_string(),
             });
         }
+
         Ok(())
     }
 

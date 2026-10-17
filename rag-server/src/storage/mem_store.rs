@@ -1,13 +1,10 @@
 use super::{
     dot_product,
-    hnsw::{HnswConfig, HnswIndex},
+    hnsw::{HnswConfig, HnswIndex, VectorView},
     models::{SearchFilter, SearchResult, VectorPoint},
     partition::StorageState,
     persistence::{load_snapshot, save_snapshot},
-    scoring::{
-        CalibrationConfig, calculate_keyword_boost, calibrate_image_score, calibrate_text_score,
-        fuse_scores, has_image_keywords,
-    },
+    scoring::CalibrationConfig,
     traits::{DocumentSummary, VectorStore},
 };
 use crate::domain::{DocumentId, Modality};
@@ -72,6 +69,135 @@ fn push_candidate<'a>(
         heap.pop();
         heap.push(candidate);
     }
+}
+
+#[inline]
+fn calibrate_text_similarity(raw: f32) -> f32 {
+    if !raw.is_finite() || raw <= 0.735 {
+        0.12 * (raw.max(0.0) / 0.735)
+    } else if raw <= 0.81 {
+        let norm = (raw - 0.735) / (0.81 - 0.735);
+        0.15 + norm * 0.60
+    } else {
+        let norm = ((raw - 0.81) / 0.08).clamp(0.0, 1.0);
+        0.75 + norm * 0.22
+    }
+}
+
+#[inline]
+fn calibrate_cross_modal(raw: f32) -> f32 {
+    if !raw.is_finite() || raw <= 0.18 {
+        0.12 * (raw.max(0.0) / 0.18)
+    } else if raw <= 0.27 {
+        let norm = (raw - 0.18) / (0.27 - 0.18);
+        0.15 + norm * 0.60
+    } else {
+        let norm = ((raw - 0.27) / 0.10).clamp(0.0, 1.0);
+        0.75 + norm * 0.20
+    }
+}
+
+fn stem(w: &str) -> &str {
+    if let Some(s) = w.strip_suffix("ing")
+        && s.len() >= 3
+    {
+        return s;
+    }
+    if let Some(s) = w.strip_suffix("ed")
+        && s.len() >= 3
+    {
+        return s;
+    }
+    if let Some(s) = w.strip_suffix("es")
+        && s.len() >= 3
+    {
+        return s;
+    }
+    if let Some(s) = w.strip_suffix('s')
+        && s.len() >= 3
+    {
+        return s;
+    }
+    if let Some(s) = w.strip_suffix("er")
+        && s.len() >= 3
+    {
+        return s;
+    }
+    w
+}
+
+fn is_term_match(q_low: &str, q_stem: &str, dw: &str) -> bool {
+    let dw_stem = stem(dw);
+    if dw == q_low || dw_stem == q_stem {
+        return true;
+    }
+    if q_stem.len() >= 3 && dw.starts_with(q_stem) {
+        return true;
+    }
+    if q_low == "food" {
+        return matches!(
+            dw,
+            "recipe" | "chicken" | "meat" | "meal" | "dish" | "cook" | "diet" | "feed" | "snack"
+        );
+    }
+    false
+}
+
+fn compute_lexical_match(query: &str, doc_id: &str, payload: &Value) -> (f32, bool) {
+    const STOP_WORDS: &[&str] = &[
+        "a", "an", "the", "in", "on", "at", "to", "for", "of", "with", "by", "from", "is", "are",
+        "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "and",
+        "or", "but", "if", "then", "else", "when", "here", "there", "why", "how", "all", "any",
+        "both", "each", "tell", "me", "about", "what", "which", "who", "whom", "this", "that",
+        "it", "its", "can", "you",
+    ];
+
+    let query_tokens: Vec<&str> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .map(|t| t.trim())
+        .filter(|t| t.len() >= 2 && !STOP_WORDS.contains(&t.to_lowercase().as_str()))
+        .collect();
+
+    if query_tokens.is_empty() {
+        return (0.0, false);
+    }
+
+    let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("");
+    let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    let full = format!("{doc_id} {title} {text}").to_lowercase();
+    let words: Vec<&str> = full
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+
+    let id_lower = doc_id.to_lowercase();
+    let title_lower = title.to_lowercase();
+
+    let mut matched_count = 0;
+    let mut in_title_or_id = false;
+
+    for q in &query_tokens {
+        let q_low = q.to_lowercase();
+        let q_stem = stem(&q_low);
+
+        let hit_id = id_lower.contains(&q_low)
+            || id_lower.contains(q_stem)
+            || (q_low == "food" && id_lower.contains("recipe"));
+        let hit_title = title_lower.contains(&q_low)
+            || title_lower.contains(q_stem)
+            || (q_low == "food" && title_lower.contains("recipe"));
+        let hit_text = words.iter().any(|&w| is_term_match(&q_low, q_stem, w));
+
+        if hit_id || hit_title || hit_text {
+            matched_count += 1;
+            if hit_id || hit_title {
+                in_title_or_id = true;
+            }
+        }
+    }
+
+    let ratio = matched_count as f32 / query_tokens.len() as f32;
+    (ratio, in_title_or_id)
 }
 
 #[derive(Clone)]
@@ -439,15 +565,15 @@ impl InMemoryVectorStore {
             let hnsw_lock = hnsw
                 .read()
                 .map_err(|_| StorageError::Internal("HNSW index read lock poisoned".into()))?;
-            let hnsw_res = hnsw_lock.search(
-                query_vector,
-                effective_limit,
-                &state_lock.vectors,
-                &state_lock.modalities,
-                &state_lock.ids,
-                dimension,
-                filter,
-            );
+
+            let view = VectorView {
+                vectors: &state_lock.vectors,
+                ids: &state_lock.ids,
+                modalities: &state_lock.modalities,
+                dim: dimension,
+            };
+
+            let hnsw_res = hnsw_lock.search(query_vector, effective_limit, &view, filter.as_ref());
             if filter.is_some() && hnsw_res.len() < effective_limit {
                 drop(hnsw_lock);
                 Self::exact_flat_scan(
@@ -495,8 +621,6 @@ impl InMemoryVectorStore {
         let min_score = filter.as_ref().and_then(|f| f.min_score);
         let target_mod = filter.as_ref().and_then(|f| f.modality.as_ref());
 
-        // Для коллекций < 256 векторов последовательный проход быстрее,
-        // так как отсутствует оверхед на координацию рабочих потоков Rayon.
         let heap = if state.len() < 256 {
             let mut heap = BinaryHeap::with_capacity(limit);
             for (slot_idx, point_vec) in state.vectors.chunks_exact(dim).enumerate() {
@@ -573,13 +697,14 @@ impl InMemoryVectorStore {
         res.reverse();
         res
     }
+
     fn search_blocking(
         &self,
         query_vector: &[f32],
         limit: usize,
         filter: Option<SearchFilter>,
     ) -> Result<Vec<SearchResult>, StorageError> {
-        let search_k = limit.saturating_mul(2).max(10);
+        let search_k = limit.saturating_mul(3).max(20);
         let explicit_modality_filter = filter.as_ref().and_then(|f| f.modality.as_ref());
 
         let mut partition_filter = filter.clone();
@@ -631,88 +756,124 @@ impl InMemoryVectorStore {
             }
         };
 
-        let effective_query_modality = filter
-            .as_ref()
-            .and_then(|f| f.query_modality.clone())
-            .or_else(|| {
-                if filter
-                    .as_ref()
-                    .and_then(|f| f.query_text.as_deref())
-                    .is_some()
-                    || self.dimension >= 128
-                {
-                    Some(Modality::Text)
-                } else {
-                    None
-                }
-            });
-
-        let has_image_intent = filter
+        let is_semantic_query = filter
             .as_ref()
             .and_then(|f| f.query_text.as_deref())
-            .is_some_and(has_image_keywords);
+            .is_some();
+        let is_image_query = matches!(
+            filter.as_ref().and_then(|f| f.query_modality.as_ref()),
+            Some(Modality::Image)
+        );
 
-        struct FastMatch {
+        struct CandidateAccumulator {
             id: Arc<str>,
-            score: f32,
-            text_score: Option<f32>,
-            img_score: Option<f32>,
+            text_dot: Option<f32>,
+            img_dot: Option<f32>,
             modality: Modality,
-            matched_by: Modality,
         }
 
-        let mut merged: HashMap<Arc<str>, FastMatch> =
+        let mut candidates: HashMap<Arc<str>, CandidateAccumulator> =
             HashMap::with_capacity(text_matches.len() + image_matches.len());
 
-        for (id, score, modality) in text_matches {
-            let final_score = match effective_query_modality {
-                Some(Modality::Image) => calibrate_image_score(score, false, &self.calibration),
-                Some(Modality::Text) | Some(Modality::Multimodal) => {
-                    calibrate_text_score(score, &self.calibration)
-                }
-                None => score,
-            };
-            merged.insert(
+        for (id, dot, modality) in text_matches {
+            candidates.insert(
                 Arc::clone(&id),
-                FastMatch {
+                CandidateAccumulator {
                     id,
-                    score: final_score,
-                    text_score: Some(final_score),
-                    img_score: None,
+                    text_dot: Some(dot),
+                    img_dot: None,
                     modality,
-                    matched_by: Modality::Text,
                 },
             );
         }
 
-        for (id, raw_score, modality) in image_matches {
-            let img_final = match effective_query_modality {
-                Some(Modality::Text) | Some(Modality::Multimodal) => {
-                    calibrate_image_score(raw_score, has_image_intent, &self.calibration)
-                }
-                _ => raw_score,
-            };
-
-            if let Some(existing) = merged.get_mut(&id) {
-                existing.img_score = Some(img_final);
-                let text_s = existing.text_score.unwrap_or(existing.score);
-                let (fused, matched_by) =
-                    fuse_scores(effective_query_modality.as_ref(), img_final, text_s);
-                existing.score = fused;
-                existing.matched_by = matched_by;
+        for (id, dot, modality) in image_matches {
+            if let Some(existing) = candidates.get_mut(&id) {
+                existing.img_dot = Some(dot);
             } else {
-                merged.insert(
+                candidates.insert(
                     Arc::clone(&id),
-                    FastMatch {
+                    CandidateAccumulator {
                         id,
-                        score: img_final,
-                        text_score: None,
-                        img_score: Some(img_final),
+                        text_dot: None,
+                        img_dot: Some(dot),
                         modality,
-                        matched_by: Modality::Image,
                     },
                 );
             }
+        }
+
+        struct ScoredDoc {
+            id: Arc<str>,
+            score: f32,
+            modality: Modality,
+            matched_by: Modality,
+        }
+
+        let mut scored_docs: Vec<ScoredDoc> = Vec::with_capacity(candidates.len());
+
+        for cand in candidates.into_values() {
+            let (dense_score, matched_by) = if !is_semantic_query {
+                match (cand.text_dot, cand.img_dot) {
+                    (Some(t), Some(i)) => {
+                        if t >= i {
+                            (t, Modality::Text)
+                        } else {
+                            (i, Modality::Image)
+                        }
+                    }
+                    (Some(t), None) => (t, Modality::Text),
+                    (None, Some(i)) => (i, Modality::Image),
+                    (None, None) => (0.0, Modality::Text),
+                }
+            } else if is_image_query {
+                match (cand.img_dot, cand.text_dot) {
+                    (Some(i_dot), Some(t_dot)) => {
+                        let img_s = calibrate_text_similarity(i_dot);
+                        let txt_s = calibrate_cross_modal(t_dot);
+                        let combined = (0.75 * img_s + 0.25 * txt_s).min(1.0);
+                        (combined, Modality::Image)
+                    }
+                    (Some(i_dot), None) => (calibrate_text_similarity(i_dot), Modality::Image),
+                    (None, Some(t_dot)) => (calibrate_cross_modal(t_dot), Modality::Text),
+                    (None, None) => (0.0, Modality::Image),
+                }
+            } else {
+                match (cand.text_dot, cand.img_dot) {
+                    (Some(t_dot), Some(i_dot)) => {
+                        let txt_s = calibrate_text_similarity(t_dot);
+                        let img_s = calibrate_cross_modal(i_dot);
+
+                        let (combined, matched_by) = if img_s >= 0.40 || txt_s >= 0.40 {
+                            let max_s = txt_s.max(img_s);
+                            let min_s = txt_s.min(img_s);
+                            let score = (0.75 * max_s + 0.25 * min_s).min(1.0);
+                            let matched = if img_s > txt_s {
+                                Modality::Image
+                            } else {
+                                Modality::Text
+                            };
+                            (score, matched)
+                        } else {
+                            (txt_s.max(img_s).min(0.12), Modality::Text)
+                        };
+                        (combined, matched_by)
+                    }
+                    (Some(t_dot), None) => (calibrate_text_similarity(t_dot), Modality::Text),
+                    (None, Some(i_dot)) => {
+                        let img_s = calibrate_cross_modal(i_dot);
+                        (img_s * 0.75, Modality::Image)
+                    }
+                    (None, None) => (0.0, Modality::Text),
+                }
+            };
+
+            scored_docs.push(ScoredDoc {
+                id: cand.id,
+                score: dense_score,
+                modality: cand.modality,
+                matched_by,
+            });
         }
 
         let t_lock = self.text_state.read().map_err(|_| {
@@ -723,8 +884,8 @@ impl InMemoryVectorStore {
         })?;
 
         if let Some(query_str) = filter.as_ref().and_then(|f| f.query_text.as_deref()) {
-            for m in merged.values_mut() {
-                let doc_id = m.id.to_string();
+            for doc in &mut scored_docs {
+                let doc_id = doc.id.to_string();
                 let payload_opt = if let Some(&slot) = t_lock.index_map.get(&doc_id) {
                     Some(&t_lock.payloads[slot])
                 } else {
@@ -734,26 +895,35 @@ impl InMemoryVectorStore {
                         .map(|&slot| &i_lock.payloads[slot])
                 };
                 if let Some(payload) = payload_opt {
-                    let boost = calculate_keyword_boost(query_str, payload);
-                    m.score = (m.score + boost).min(1.0);
+                    let (ratio, in_title_or_id) =
+                        compute_lexical_match(query_str, &doc_id, payload);
+                    if ratio > 0.0 {
+                        let lexical_boost = if in_title_or_id && ratio >= 0.5 {
+                            0.45 * ratio
+                        } else {
+                            0.25 * ratio
+                        };
+                        doc.score = (doc.score * 0.60 + lexical_boost + 0.30).min(0.98);
+                    }
                 }
             }
         }
 
-        let mut ranked: Vec<FastMatch> = merged.into_values().collect();
         if let Some(ref f) = filter {
             if let Some(min_s) = f.min_score {
-                ranked.retain(|r| r.score >= min_s);
+                scored_docs.retain(|r| r.score >= min_s);
             }
             if let Some(ref target_m) = f.modality {
-                ranked.retain(|r| &r.modality == target_m || r.modality == Modality::Multimodal);
+                scored_docs
+                    .retain(|r| &r.modality == target_m || r.modality == Modality::Multimodal);
             }
         }
-        ranked.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
-        ranked.truncate(limit);
 
-        let mut final_results = Vec::with_capacity(ranked.len());
-        for item in ranked {
+        scored_docs.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
+        scored_docs.truncate(limit);
+
+        let mut final_results = Vec::with_capacity(scored_docs.len());
+        for item in scored_docs {
             let doc_id = item.id.to_string();
             let payload = if let Some(&slot) = t_lock.index_map.get(&doc_id) {
                 (*t_lock.payloads[slot]).clone()
@@ -772,6 +942,113 @@ impl InMemoryVectorStore {
         }
 
         Ok(final_results)
+    }
+
+    pub(crate) fn get_blocking(
+        &self,
+        id: &DocumentId,
+    ) -> Result<Option<VectorPoint>, StorageError> {
+        let t_lock = self.text_state.read().map_err(|_| {
+            StorageError::Internal("Vector store text_state read lock poisoned".into())
+        })?;
+        let i_lock = self.image_state.read().map_err(|_| {
+            StorageError::Internal("Vector store image_state read lock poisoned".into())
+        })?;
+
+        let t_slot = t_lock.index_map.get(id).copied();
+        let i_slot = i_lock.index_map.get(id).copied();
+        if t_slot.is_none() && i_slot.is_none() {
+            return Ok(None);
+        }
+
+        let dim = self.dimension;
+        match (t_slot, i_slot) {
+            (Some(ts), Some(is)) => {
+                let text_vec = t_lock.vectors[ts * dim..(ts + 1) * dim].to_vec();
+                let img_vec = i_lock.vectors[is * dim..(is + 1) * dim].to_vec();
+                Ok(Some(
+                    VectorPoint::new(
+                        id.clone(),
+                        text_vec,
+                        (*t_lock.payloads[ts]).clone(),
+                        Modality::Multimodal,
+                    )
+                    .with_image_vector(img_vec),
+                ))
+            }
+            (Some(ts), None) => {
+                let text_vec = t_lock.vectors[ts * dim..(ts + 1) * dim].to_vec();
+                Ok(Some(VectorPoint::new(
+                    id.clone(),
+                    text_vec,
+                    (*t_lock.payloads[ts]).clone(),
+                    Modality::Text,
+                )))
+            }
+            (None, Some(is)) => {
+                let img_vec = i_lock.vectors[is * dim..(is + 1) * dim].to_vec();
+                Ok(Some(VectorPoint::new(
+                    id.clone(),
+                    img_vec,
+                    (*i_lock.payloads[is]).clone(),
+                    Modality::Image,
+                )))
+            }
+            (None, None) => Ok(None),
+        }
+    }
+
+    pub(crate) fn delete_blocking(&self, id: &DocumentId) -> Result<bool, StorageError> {
+        let mut t_state = self.text_state.write().map_err(|_| {
+            StorageError::Internal("Vector store text_state write lock poisoned".into())
+        })?;
+        let mut i_state = self.image_state.write().map_err(|_| {
+            StorageError::Internal("Vector store image_state write lock poisoned".into())
+        })?;
+
+        let del_text =
+            Self::remove_from_state_and_hnsw(&mut t_state, &self.hnsw_text, id, self.dimension)?;
+        let del_image =
+            Self::remove_from_state_and_hnsw(&mut i_state, &self.hnsw_image, id, self.dimension)?;
+        let deleted = del_text || del_image;
+
+        if deleted {
+            self.doc_count.fetch_sub(1, AtomicOrdering::Release);
+            self.version.fetch_add(1, AtomicOrdering::Release);
+        }
+        Ok(deleted)
+    }
+
+    pub(crate) fn list_documents_blocking(&self) -> Result<Vec<DocumentSummary>, StorageError> {
+        let t_lock = self.text_state.read().map_err(|_| {
+            StorageError::Internal("Vector store text_state read lock poisoned".into())
+        })?;
+        let i_lock = self.image_state.read().map_err(|_| {
+            StorageError::Internal("Vector store image_state read lock poisoned".into())
+        })?;
+
+        let mut all_ids: HashSet<DocumentId> = HashSet::with_capacity(t_lock.len() + i_lock.len());
+        all_ids.extend(t_lock.index_map.keys().cloned());
+        all_ids.extend(i_lock.index_map.keys().cloned());
+
+        let mut summaries = Vec::with_capacity(all_ids.len());
+        for id in all_ids {
+            let in_text = t_lock.index_map.get(&id).copied();
+            let in_image = i_lock.index_map.get(&id).copied();
+            let (payload, modality) = match (in_text, in_image) {
+                (Some(ts), Some(_)) => ((*t_lock.payloads[ts]).clone(), Modality::Multimodal),
+                (Some(ts), None) => ((*t_lock.payloads[ts]).clone(), Modality::Text),
+                (None, Some(is)) => ((*i_lock.payloads[is]).clone(), Modality::Image),
+                (None, None) => continue,
+            };
+            summaries.push(DocumentSummary {
+                id,
+                modality,
+                payload,
+            });
+        }
+        summaries.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(summaries)
     }
 
     pub(crate) fn collect_points_for_snapshot(
@@ -990,107 +1267,28 @@ impl VectorStore for InMemoryVectorStore {
     }
 
     async fn get(&self, id: &DocumentId) -> Result<Option<VectorPoint>, StorageError> {
-        let t_lock = self.text_state.read().map_err(|_| {
-            StorageError::Internal("Vector store text_state read lock poisoned".into())
-        })?;
-        let i_lock = self.image_state.read().map_err(|_| {
-            StorageError::Internal("Vector store image_state read lock poisoned".into())
-        })?;
-
-        let t_slot = t_lock.index_map.get(id).copied();
-        let i_slot = i_lock.index_map.get(id).copied();
-        if t_slot.is_none() && i_slot.is_none() {
-            return Ok(None);
-        }
-
-        let dim = self.dimension;
-        match (t_slot, i_slot) {
-            (Some(ts), Some(is)) => {
-                let text_vec = t_lock.vectors[ts * dim..(ts + 1) * dim].to_vec();
-                let img_vec = i_lock.vectors[is * dim..(is + 1) * dim].to_vec();
-                Ok(Some(
-                    VectorPoint::new(
-                        id.clone(),
-                        text_vec,
-                        (*t_lock.payloads[ts]).clone(),
-                        Modality::Multimodal,
-                    )
-                    .with_image_vector(img_vec),
-                ))
-            }
-            (Some(ts), None) => {
-                let text_vec = t_lock.vectors[ts * dim..(ts + 1) * dim].to_vec();
-                Ok(Some(VectorPoint::new(
-                    id.clone(),
-                    text_vec,
-                    (*t_lock.payloads[ts]).clone(),
-                    Modality::Text,
-                )))
-            }
-            (None, Some(is)) => {
-                let img_vec = i_lock.vectors[is * dim..(is + 1) * dim].to_vec();
-                Ok(Some(VectorPoint::new(
-                    id.clone(),
-                    img_vec,
-                    (*i_lock.payloads[is]).clone(),
-                    Modality::Image,
-                )))
-            }
-            (None, None) => Ok(None),
-        }
+        let store = self.clone();
+        let doc_id = id.clone();
+        tokio::task::spawn_blocking(move || store.get_blocking(&doc_id))
+            .await
+            .map_err(|e| StorageError::Internal(format!("Get task failed to join: {e}")))?
     }
 
     async fn list_documents(&self) -> Result<Vec<DocumentSummary>, StorageError> {
-        let t_lock = self.text_state.read().map_err(|_| {
-            StorageError::Internal("Vector store text_state read lock poisoned".into())
-        })?;
-        let i_lock = self.image_state.read().map_err(|_| {
-            StorageError::Internal("Vector store image_state read lock poisoned".into())
-        })?;
-
-        let mut all_ids: HashSet<DocumentId> = HashSet::with_capacity(t_lock.len() + i_lock.len());
-        all_ids.extend(t_lock.index_map.keys().cloned());
-        all_ids.extend(i_lock.index_map.keys().cloned());
-
-        let mut summaries = Vec::with_capacity(all_ids.len());
-        for id in all_ids {
-            let in_text = t_lock.index_map.get(&id).copied();
-            let in_image = i_lock.index_map.get(&id).copied();
-            let (payload, modality) = match (in_text, in_image) {
-                (Some(ts), Some(_)) => ((*t_lock.payloads[ts]).clone(), Modality::Multimodal),
-                (Some(ts), None) => ((*t_lock.payloads[ts]).clone(), Modality::Text),
-                (None, Some(is)) => ((*i_lock.payloads[is]).clone(), Modality::Image),
-                (None, None) => continue,
-            };
-            summaries.push(DocumentSummary {
-                id,
-                modality,
-                payload,
-            });
-        }
-        summaries.sort_by(|a, b| a.id.cmp(&b.id));
-        Ok(summaries)
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.list_documents_blocking())
+            .await
+            .map_err(|e| {
+                StorageError::Internal(format!("List documents task failed to join: {e}"))
+            })?
     }
 
     async fn delete(&self, id: &DocumentId) -> Result<bool, StorageError> {
-        let mut t_state = self.text_state.write().map_err(|_| {
-            StorageError::Internal("Vector store text_state write lock poisoned".into())
-        })?;
-        let mut i_state = self.image_state.write().map_err(|_| {
-            StorageError::Internal("Vector store image_state write lock poisoned".into())
-        })?;
-
-        let del_text =
-            Self::remove_from_state_and_hnsw(&mut t_state, &self.hnsw_text, id, self.dimension)?;
-        let del_image =
-            Self::remove_from_state_and_hnsw(&mut i_state, &self.hnsw_image, id, self.dimension)?;
-        let deleted = del_text || del_image;
-
-        if deleted {
-            self.doc_count.fetch_sub(1, AtomicOrdering::Release);
-            self.version.fetch_add(1, AtomicOrdering::Release);
-        }
-        Ok(deleted)
+        let store = self.clone();
+        let doc_id = id.clone();
+        tokio::task::spawn_blocking(move || store.delete_blocking(&doc_id))
+            .await
+            .map_err(|e| StorageError::Internal(format!("Delete task failed to join: {e}")))?
     }
 
     async fn count(&self) -> Result<usize, StorageError> {

@@ -4,76 +4,76 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalibrationConfig {
-    pub cross_modal_min: f32,
-    pub cross_modal_max: f32,
     pub text_noise_floor: f32,
     pub text_match_ceiling: f32,
-    pub text_modal_min: f32,
-    pub text_modal_max: f32,
-    pub image_trigger_boost: f32,
+    pub cross_modal_min: f32,
+    pub cross_modal_max: f32,
 }
 
 impl Default for CalibrationConfig {
     fn default() -> Self {
         Self {
-            cross_modal_min: 0.14,
-            cross_modal_max: 0.28,
-            text_noise_floor: 0.67,
-            text_match_ceiling: 0.78,
-            text_modal_min: 0.55,
-            text_modal_max: 0.95,
-            image_trigger_boost: 0.15,
+            text_noise_floor: 0.65,
+            text_match_ceiling: 0.85,
+            cross_modal_min: 0.16,
+            cross_modal_max: 0.30,
         }
     }
 }
 
 #[inline]
 pub fn calibrate_text_score(raw_score: f32, cfg: &CalibrationConfig) -> f32 {
-    if raw_score <= cfg.text_noise_floor {
-        let floor = cfg.text_noise_floor.max(f32::EPSILON);
-        (raw_score / floor).powi(4) * 0.15
-    } else {
-        let denom = (cfg.text_match_ceiling - cfg.text_noise_floor).max(f32::EPSILON);
-        let norm = ((raw_score - cfg.text_noise_floor) / denom).clamp(0.0, 1.0);
-        0.20 + norm * 0.75
-    }
+    let denom = (cfg.text_match_ceiling - cfg.text_noise_floor).max(f32::EPSILON);
+    ((raw_score - cfg.text_noise_floor) / denom).clamp(0.0, 1.0)
 }
 
 #[inline]
 pub fn calibrate_image_score(
     raw_score: f32,
-    has_image_intent: bool,
+    _has_image_intent: bool,
     cfg: &CalibrationConfig,
 ) -> f32 {
-    let calibrated = if raw_score <= 0.0 {
-        0.0
-    } else if raw_score < cfg.cross_modal_min {
-        let cross_min = cfg.cross_modal_min.max(f32::EPSILON);
-        (raw_score / cross_min) * 0.25
-    } else if raw_score <= cfg.cross_modal_max {
-        let denom = (cfg.cross_modal_max - cfg.cross_modal_min).max(f32::EPSILON);
-        let normalized = (raw_score - cfg.cross_modal_min) / denom;
-        cfg.text_modal_min + normalized * (cfg.text_modal_max - cfg.text_modal_min)
-    } else {
-        let denom = (1.0 - cfg.cross_modal_max).max(f32::EPSILON);
-        let extra = ((raw_score - cfg.cross_modal_max) / denom).clamp(0.0, 1.0);
-        cfg.text_modal_max + extra * (0.98 - cfg.text_modal_max)
-    };
-
-    if has_image_intent && raw_score >= cfg.cross_modal_min {
-        (calibrated + cfg.image_trigger_boost).min(1.0)
-    } else {
-        calibrated
-    }
+    let denom = (cfg.cross_modal_max - cfg.cross_modal_min).max(f32::EPSILON);
+    ((raw_score - cfg.cross_modal_min) / denom).clamp(0.0, 1.0)
 }
 
-pub fn calculate_keyword_boost(query_text: &str, payload: &Value) -> f32 {
-    let text = match payload.get("text").and_then(|v| v.as_str()) {
-        Some(t) => t,
-        None => return 0.0,
-    };
+fn stem(word: &str) -> &str {
+    if let Some(s) = word.strip_suffix("ing")
+        && s.len() >= 3
+    {
+        return s;
+    }
+    if let Some(s) = word.strip_suffix("ed")
+        && s.len() >= 3
+    {
+        return s;
+    }
+    if let Some(s) = word.strip_suffix("es")
+        && s.len() >= 3
+    {
+        return s;
+    }
+    if let Some(s) = word.strip_suffix('s')
+        && s.len() >= 3
+    {
+        return s;
+    }
+    if let Some(s) = word.strip_suffix("er")
+        && s.len() >= 3
+    {
+        return s;
+    }
+    word
+}
+
+/// Вычисляет взвешенное лексическое пересечение терминов (заголовок: 2.5, текст: 1.0)
+pub fn calculate_keyword_score(query_text: &str, payload: &Value) -> f32 {
     let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("");
-    let lower_doc = format!("{} {}", text, title).to_lowercase();
+    let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
+
+    if title.is_empty() && text.is_empty() {
+        return 0.0;
+    }
 
     const STOP_WORDS: &[&str] = &[
         "a", "an", "the", "in", "on", "at", "to", "for", "of", "with", "by", "from", "is", "are",
@@ -83,8 +83,18 @@ pub fn calculate_keyword_boost(query_text: &str, payload: &Value) -> f32 {
         "it", "its",
     ];
 
-    let mut matches = 0;
+    let title_words: Vec<&str> = title
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+
+    let text_words: Vec<&str> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+
     let mut query_terms = 0;
+    let mut match_weight = 0.0f32;
 
     for raw_token in query_text.split(|c: char| !c.is_alphanumeric()) {
         let token = raw_token.trim().to_lowercase();
@@ -92,57 +102,51 @@ pub fn calculate_keyword_boost(query_text: &str, payload: &Value) -> f32 {
             continue;
         }
         query_terms += 1;
-        let stem = token.strip_suffix('s').unwrap_or(&token);
-        if lower_doc.contains(&token) || lower_doc.contains(stem) {
-            matches += 1;
+        let token_stem = stem(&token);
+
+        let in_title = title_words.iter().any(|&tw| {
+            let tw_l = tw.to_lowercase();
+            tw_l == token
+                || stem(&tw_l) == token_stem
+                || (token_stem.len() >= 4 && tw_l.contains(token_stem))
+        });
+
+        let in_text = text_words.iter().any(|&dw| {
+            let dw_l = dw.to_lowercase();
+            dw_l == token
+                || stem(&dw_l) == token_stem
+                || (token_stem.len() >= 4 && dw_l.contains(token_stem))
+        });
+
+        if in_title {
+            match_weight += 2.5;
+        } else if in_text {
+            match_weight += 1.0;
         }
     }
 
-    if query_terms > 0 && matches > 0 {
-        let ratio = matches as f32 / query_terms as f32;
-        0.18 * ratio
+    if query_terms > 0 && match_weight > 0.0 {
+        (match_weight / (query_terms as f32 * 2.5)).clamp(0.0, 1.0)
     } else {
         0.0
     }
 }
 
-#[inline]
-pub fn has_image_keywords(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    const EXACT_KEYWORDS: &[&str] = &[
-        "photo",
-        "photos",
-        "image",
-        "images",
-        "picture",
-        "pictures",
-        "pic",
-        "pics",
-        "snapshot",
-        "snapshots",
-        "drawing",
-        "drawings",
-        "illustration",
-        "illustrations",
-        "фото",
-        "зображення",
-        "картинка",
-        "картин",
-    ];
+/// Слияние Dense и Sparse оценок по алгоритму RRF (Reciprocal Rank Fusion)
+pub fn compute_rrf_hybrid_score(dense_score: f32, sparse_score: f32) -> f32 {
+    const K: f32 = 20.0;
+    let rank_dense = (1.0 - dense_score).max(0.0) * 10.0;
+    let rank_sparse = (1.0 - sparse_score).max(0.0) * 10.0;
 
-    lower
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .any(|token| {
-            EXACT_KEYWORDS.contains(&token)
-                || token.starts_with("фотк")
-                || token.starts_with("фотограф")
-                || token.starts_with("картинк")
-                || token.starts_with("рисун")
-                || token.starts_with("изображен")
-                || token.starts_with("світлин")
-                || token.starts_with("малюн")
-        })
+    let rrf_dense = 1.0 / (K + rank_dense);
+    let rrf_sparse = if sparse_score > 0.0 {
+        1.5 / (K + rank_sparse)
+    } else {
+        0.0
+    };
+
+    let max_possible = (1.0 / K) + (1.5 / K);
+    ((rrf_dense + rrf_sparse) / max_possible).clamp(0.0, 1.0)
 }
 
 pub fn fuse_scores(
@@ -152,24 +156,28 @@ pub fn fuse_scores(
 ) -> (f32, Modality) {
     match query_modality {
         Some(Modality::Text) => {
-            let fused = (0.55 * img_score + 0.45 * text_score).min(1.0);
+            let fused = 0.85 * text_score + 0.15 * img_score;
+            let matched_by = if img_score > text_score + 0.20 {
+                Modality::Image
+            } else {
+                Modality::Text
+            };
+            (fused.clamp(0.0, 1.0), matched_by)
+        }
+        Some(Modality::Image) => {
+            let fused = 0.85 * img_score + 0.15 * text_score;
+            (fused.clamp(0.0, 1.0), Modality::Image)
+        }
+        _ => {
+            let max_s = text_score.max(img_score);
+            let min_s = text_score.min(img_score);
+            let fused = 0.75 * max_s + 0.25 * min_s;
             let matched_by = if img_score > text_score {
                 Modality::Image
             } else {
                 Modality::Text
             };
-            (fused, matched_by)
-        }
-        Some(Modality::Image) => {
-            let fused = (0.70 * img_score + 0.30 * text_score).min(1.0);
-            (fused, Modality::Image)
-        }
-        _ => {
-            if img_score > text_score {
-                (img_score, Modality::Image)
-            } else {
-                (text_score, Modality::Text)
-            }
+            (fused.clamp(0.0, 1.0), matched_by)
         }
     }
 }

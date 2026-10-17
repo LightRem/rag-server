@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use ort::{environment::Environment, session::SessionOutputs, value::TensorRef};
 use std::{path::Path, sync::Arc};
-use tokenizers::Tokenizer;
+use tokenizers::{PaddingStrategy, Tokenizer, TruncationDirection, TruncationStrategy};
 
 const TEXT_PRIORITY_NAMES: &[&str] = &[
     "text_embeds",
@@ -69,12 +69,14 @@ impl OnnxClipEmbedder {
             .map_err(|e| InferenceError::Preprocessing(format!("Failed to load tokenizer: {e}")))?;
 
         let mut padding_params = tokenizer.get_padding().cloned().unwrap_or_default();
-        padding_params.strategy = tokenizers::PaddingStrategy::Fixed(CLIP_TEXT_SEQ_LEN);
+        padding_params.strategy = PaddingStrategy::Fixed(CLIP_TEXT_SEQ_LEN);
         padding_params.pad_id = CLIP_EOT_TOKEN_ID as u32;
         padding_params.pad_token = "<|endoftext|>".to_string();
 
         let mut truncation_params = tokenizer.get_truncation().cloned().unwrap_or_default();
         truncation_params.max_length = CLIP_TEXT_SEQ_LEN;
+        truncation_params.strategy = TruncationStrategy::LongestFirst;
+        truncation_params.direction = TruncationDirection::Right;
 
         tokenizer
             .with_padding(Some(padding_params))
@@ -176,7 +178,7 @@ impl Embedder for OnnxClipEmbedder {
     }
 
     async fn embed_text_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
-        let input_tensor = TextPreprocessor::preprocess_batch(&self.tokenizer, texts)?;
+        let mut input_tensor = TextPreprocessor::preprocess_batch(&self.tokenizer, texts)?;
         let permit = self.text_pool.acquire_permit().await?;
         let pool = self.text_pool.clone();
         let expected_dim = self.dimension;
@@ -187,10 +189,22 @@ impl Embedder for OnnxClipEmbedder {
             let mut guard = SessionGuard::new(pool, session, permit);
 
             let shape = [expected_count, CLIP_TEXT_SEQ_LEN];
-            let slice = input_tensor.as_slice().ok_or_else(|| {
+            let slice = input_tensor.as_slice_mut().ok_or_else(|| {
                 InferenceError::Execution("Text tensor buffer is not contiguous".into())
             })?;
-            let input_ref = TensorRef::from_array_view((shape, slice))
+
+            // Если при усечении токен конца предложения (<|endoftext|>) был отсечен,
+            // восстанавливаем его на последней позиции окна (76), чтобы CLIP пулил семантику
+            let eot_id = CLIP_EOT_TOKEN_ID as _;
+            for chunk in slice.chunks_exact_mut(CLIP_TEXT_SEQ_LEN) {
+                if !chunk.contains(&eot_id)
+                    && let Some(last) = chunk.last_mut()
+                {
+                    *last = eot_id;
+                }
+            }
+
+            let input_ref = TensorRef::from_array_view((shape, &*slice))
                 .map_err(|e| InferenceError::Execution(e.to_string()))?;
 
             let outputs = guard

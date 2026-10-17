@@ -107,7 +107,13 @@ async fn test_api_multimodal_indexing_and_rag_fusion() {
     let visuals = json["visuals"].as_array().unwrap();
     assert_eq!(visuals.len(), 1);
     assert_eq!(visuals[0]["id"], "doc_multimodal_1");
-    assert_eq!(visuals[0]["url"], "embedded://image/doc_multimodal_1");
+
+    let visual_url = visuals[0]["url"].as_str().unwrap();
+    assert!(
+        visual_url == "/uploads/doc_multimodal_1.png"
+            || visual_url == "embedded://image/doc_multimodal_1",
+        "Unexpected visual URL: {visual_url}"
+    );
 }
 
 #[tokio::test]

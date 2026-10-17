@@ -13,16 +13,20 @@ use axum::{
     routing::{delete, get, post},
 };
 pub use models::MAX_BATCH_SIZE;
-use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
+use tower_http::{limit::RequestBodyLimitLayer, services::ServeDir, trace::TraceLayer};
 
 async fn index_page_handler() -> Html<&'static str> {
     Html(include_str!("../../static/index.html"))
 }
 
 pub fn build_router(state: AppState) -> Router {
-    let max_body_bytes = state.config().server.max_body_limit_mb * 1024 * 1024;
+    let max_body_bytes = state.config().server.max_body_limit_bytes();
+    let uploads_path = state.uploads_dir().to_path_buf();
+    let _ = std::fs::create_dir_all(&uploads_path);
+
     Router::new()
         .route("/", get(index_page_handler))
+        .nest_service("/uploads", ServeDir::new(uploads_path))
         .route("/health", get(system::health_check_handler))
         .route(
             "/api/v1/payload/validate",

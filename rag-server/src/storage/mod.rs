@@ -6,7 +6,7 @@ pub mod persistence;
 pub mod scoring;
 pub mod traits;
 
-pub use hnsw::{HnswConfig, HnswIndex};
+pub use hnsw::{HnswConfig, HnswIndex, VectorView};
 pub use mem_store::{DEFAULT_MAX_CAPACITY, InMemoryVectorStore};
 pub use models::{SearchFilter, SearchResult, VectorPoint};
 pub use scoring::CalibrationConfig;

@@ -6,7 +6,7 @@ use crate::{
     state::AppState,
     storage::{InMemoryVectorStore, traits::VectorStore},
 };
-use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, task::JoinHandle};
 
 fn init_embedder(config: &ModelConfig) -> Arc<dyn Embedder> {
@@ -202,9 +202,9 @@ pub async fn run(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState::new(config.clone(), embedder, vector_store.clone(), pipeline);
     let app = build_router(state);
 
-    let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port).parse()?;
-    let listener = TcpListener::bind(addr).await?;
-    tracing::info!("Server actively listening on http://{}", addr);
+    let listener = TcpListener::bind((config.server.host.as_str(), config.server.port)).await?;
+    let local_addr = listener.local_addr()?;
+    tracing::info!("Server actively listening on http://{}", local_addr);
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
