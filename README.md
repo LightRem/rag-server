@@ -10,7 +10,7 @@ A production-ready, asynchronous Multimodal Vector Search and Retrieval-Augmente
 ---
 
 <p align="center">
-  <img width="745" height="452" alt="image" src="https://github.com/user-attachments/assets/9e296f48-0810-424b-8da3-808ebb81cd4a" />
+  <img src="https://github.com/user-attachments/assets/bb795330-e83d-4228-8549-7ae0d75ded60" alt="Multimodal RAG Minimal Control Panel" width="100%" />
 </p>
 
 ---
