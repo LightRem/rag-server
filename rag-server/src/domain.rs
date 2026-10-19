@@ -58,6 +58,19 @@ pub enum Modality {
     Multimodal,
 }
 
+impl Modality {
+    /// Whether a document with this modality passes a modality filter for `requested`.
+    /// A multimodal document holds both text and image, so it passes either filter.
+    /// Every search path (flat scan, HNSW, post-filter) must use this one rule.
+    #[inline]
+    pub fn matches_filter(&self, requested: &Modality) -> bool {
+        match self {
+            Modality::Multimodal => true,
+            Modality::Text | Modality::Image => self == requested,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawImageData {
     pub bytes: Bytes,

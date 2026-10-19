@@ -542,11 +542,10 @@ impl HnswIndex {
         let target_mod = filter.and_then(|f| f.modality.as_ref());
         let total_nodes = self.nodes.len();
         let matches_filter = |slot: usize, score: f32| -> bool {
-            if let Some(m) = target_mod {
-                let doc_mod = &view.modalities[slot];
-                if doc_mod != m && *doc_mod != Modality::Multimodal {
-                    return false;
-                }
+            if let Some(m) = target_mod
+                && !view.modalities[slot].matches_filter(m)
+            {
+                return false;
             }
             if min_score.is_some_and(|min| score < min) {
                 return false;

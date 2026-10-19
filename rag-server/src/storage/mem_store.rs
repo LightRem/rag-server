@@ -653,12 +653,10 @@ impl InMemoryVectorStore {
         let heap = if state.len() < 256 {
             let mut heap = BinaryHeap::with_capacity(limit);
             for (slot_idx, point_vec) in state.vectors.chunks_exact(dim).enumerate() {
-                if let Some(modality) = target_mod {
-                    let doc_mod = &state.modalities[slot_idx];
-                    let matches = doc_mod == modality || *doc_mod == Modality::Multimodal;
-                    if !matches {
-                        continue;
-                    }
+                if let Some(modality) = target_mod
+                    && !state.modalities[slot_idx].matches_filter(modality)
+                {
+                    continue;
                 }
                 let score = dot_product(query, point_vec);
                 if !score.is_finite() || min_score.is_some_and(|min| score < min) {
@@ -684,12 +682,10 @@ impl InMemoryVectorStore {
                 .fold(
                     || BinaryHeap::with_capacity(limit),
                     |mut local_heap, (slot_idx, point_vec)| {
-                        if let Some(modality) = target_mod {
-                            let doc_mod = &state.modalities[slot_idx];
-                            let matches = doc_mod == modality || *doc_mod == Modality::Multimodal;
-                            if !matches {
-                                return local_heap;
-                            }
+                        if let Some(modality) = target_mod
+                            && !state.modalities[slot_idx].matches_filter(modality)
+                        {
+                            return local_heap;
                         }
                         let score = dot_product(query, point_vec);
                         if !score.is_finite() || min_score.is_some_and(|min| score < min) {
@@ -1003,8 +999,7 @@ impl InMemoryVectorStore {
                 scored_docs.retain(|r| r.score >= min_s);
             }
             if let Some(ref target_m) = f.modality {
-                scored_docs
-                    .retain(|r| &r.modality == target_m || r.modality == Modality::Multimodal);
+                scored_docs.retain(|r| r.modality.matches_filter(target_m));
             }
         }
 

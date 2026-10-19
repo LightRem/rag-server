@@ -100,12 +100,12 @@ impl OnnxClipEmbedder {
     }
 }
 
-fn extract_and_normalize_embeddings(
+fn extract_raw_embeddings(
     outputs: SessionOutputs<'_>,
     priority_names: &[&str],
     expected_count: usize,
     expected_dim: usize,
-) -> Result<Vec<Vec<f32>>, InferenceError> {
+) -> Result<Vec<f32>, InferenceError> {
     let outputs_vec: Vec<_> = outputs.into_iter().collect();
     let mut best_priority_idx = usize::MAX;
     let mut best_match_idx = None;
@@ -161,6 +161,13 @@ fn extract_and_normalize_embeddings(
         });
     }
 
+    // Copy out while the session is still borrowed by `outputs`.
+    Ok(data.to_vec())
+}
+
+/// Splits a flat `[count, dim]` buffer into L2-normalized rows.
+/// Called after the session is back in the pool, so a failure here never reloads the model.
+fn normalize_rows(data: Vec<f32>, expected_dim: usize) -> Result<Vec<Vec<f32>>, InferenceError> {
     data.chunks_exact(expected_dim)
         .map(|chunk| {
             let mut vec = chunk.to_vec();
@@ -211,15 +218,12 @@ impl Embedder for OnnxClipEmbedder {
                 .run(ort::inputs![input_ref])
                 .map_err(|e| InferenceError::Execution(e.to_string()))?;
 
-            let embeddings = extract_and_normalize_embeddings(
-                outputs,
-                TEXT_PRIORITY_NAMES,
-                expected_count,
-                expected_dim,
-            )?;
-
+            // `run` succeeded, so the session is healthy even if output parsing fails.
+            // Return it to the pool first; only a failed `run` should trigger a model reload.
+            let raw =
+                extract_raw_embeddings(outputs, TEXT_PRIORITY_NAMES, expected_count, expected_dim);
             guard.success();
-            Ok(embeddings)
+            normalize_rows(raw?, expected_dim)
         })
         .await
         .map_err(|e| InferenceError::Execution(e.to_string()))?
@@ -259,15 +263,16 @@ impl Embedder for OnnxClipEmbedder {
                 .run(ort::inputs![input_ref])
                 .map_err(|e| InferenceError::Execution(e.to_string()))?;
 
-            let embeddings = extract_and_normalize_embeddings(
+            // `run` succeeded, so the session is healthy even if output parsing fails.
+            // Return it to the pool first; only a failed `run` should trigger a model reload.
+            let raw = extract_raw_embeddings(
                 outputs,
                 VISION_PRIORITY_NAMES,
                 expected_count,
                 expected_dim,
-            )?;
-
+            );
             guard.success();
-            Ok(embeddings)
+            normalize_rows(raw?, expected_dim)
         })
         .await
         .map_err(|e| InferenceError::Execution(e.to_string()))?
