@@ -1,0 +1,50 @@
+services:
+  rag-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: multimodal-rag-server
+    user: "1000:1000"
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      - RAG_SERVER__HOST=0.0.0.0
+      - RAG_SERVER__PORT=8080
+      - RAG_LLM__ENDPOINT=http://host.docker.internal:11434/v1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - rag_data:/app/data
+      - ./models:/app/models
+      - rag_uploads:/app/uploads
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama-service
+    profiles: ["full"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  rag_data:
+  rag_uploads:
+  ollama_data:
