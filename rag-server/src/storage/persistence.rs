@@ -1,6 +1,6 @@
-use super::{InMemoryVectorStore, models::VectorPoint};
 use crate::domain::DocumentId;
 use crate::error::StorageError;
+use crate::storage::{InMemoryVectorStore, VectorPoint};
 use serde::de::{Deserializer, SeqAccess, Visitor};
 use std::{
     fmt,
@@ -94,6 +94,7 @@ pub fn save_snapshot(
     let counter = TMP_FILE_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
     let pid = std::process::id();
     let tmp_path = PathBuf::from(format!("{}.tmp.{}.{}", path.display(), pid, counter));
+    let backup_path = PathBuf::from(format!("{}.bak.{}.{}", path.display(), pid, counter));
 
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         let _ = std::fs::create_dir_all(parent);
@@ -140,14 +141,23 @@ pub fn save_snapshot(
             .map_err(|e| StorageError::Internal(format!("Failed to fsync snapshot: {e}")))?;
     }
 
+    let mut has_backup = false;
+
     if let Err(rename_err) = std::fs::rename(&tmp_path, path) {
         if path.exists() {
-            let _ = std::fs::remove_file(path);
-            std::fs::rename(&tmp_path, path).map_err(|e| {
-                StorageError::Internal(format!(
-                    "Failed to commit snapshot after file replacement: {e}"
-                ))
-            })?;
+            if let Err(backup_err) = std::fs::rename(path, &backup_path) {
+                return Err(StorageError::Internal(format!(
+                    "Failed to backup existing snapshot ({backup_err}), original rename error: {rename_err}"
+                )));
+            }
+            has_backup = true;
+
+            if let Err(replace_err) = std::fs::rename(&tmp_path, path) {
+                let _ = std::fs::rename(&backup_path, path);
+                return Err(StorageError::Internal(format!(
+                    "Failed to commit snapshot ({replace_err}), existing snapshot successfully restored"
+                )));
+            }
         } else {
             return Err(StorageError::Internal(format!(
                 "Failed to commit snapshot: {rename_err}"
@@ -156,6 +166,11 @@ pub fn save_snapshot(
     }
 
     tmp_guard.commit();
+
+    if has_backup {
+        let _ = std::fs::remove_file(&backup_path);
+    }
+
     Ok(())
 }
 

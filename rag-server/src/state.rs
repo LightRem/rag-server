@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use crate::error::ApiError;
 use crate::inference::Embedder;
 use crate::rag::RagPipeline;
 use crate::storage::VectorStore;
@@ -22,28 +23,39 @@ impl AppState {
         embedder: Arc<dyn Embedder>,
         vector_store: Arc<dyn VectorStore>,
         pipeline: Arc<RagPipeline>,
-    ) -> Self {
-        let uploads_dir = std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join("uploads");
+    ) -> Result<Self, ApiError> {
+        let uploads_dir = config.server.uploads_dir.clone();
 
-        let _ = std::fs::create_dir_all(&uploads_dir);
-        let canonical_uploads_dir = uploads_dir.canonicalize().unwrap_or(uploads_dir);
+        std::fs::create_dir_all(&uploads_dir).map_err(|e| {
+            ApiError::Internal(format!(
+                "Failed to create uploads directory at '{uploads_dir:?}': {e}"
+            ))
+        })?;
+
+        let canonical_uploads_dir = uploads_dir.canonicalize().map_err(|e| {
+            ApiError::Internal(format!(
+                "Failed to canonicalize uploads directory '{uploads_dir:?}': {e}"
+            ))
+        })?;
 
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .expect("Failed to build HTTP client with custom timeout and redirect policy");
+            .map_err(|e| {
+                ApiError::Internal(format!(
+                    "Failed to build HTTP client with custom timeout and redirect policy: {e}"
+                ))
+            })?;
 
-        Self {
+        Ok(Self {
             config: Arc::new(config),
             embedder,
             vector_store,
             pipeline,
             http_client,
             uploads_dir: Arc::new(canonical_uploads_dir),
-        }
+        })
     }
 
     pub fn config(&self) -> &AppConfig {

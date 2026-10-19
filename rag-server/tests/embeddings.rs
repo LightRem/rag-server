@@ -7,26 +7,17 @@ use http_body_util::BodyExt;
 use rag_server::{
     config::AppConfig,
     inference::{Embedder, MockEmbedder, l2_normalize, preprocessor::ImagePreprocessor},
-    rag::{EmbedderTextAdapter, MockLlmClient, RagPipeline},
+    rag::MockLlmClient,
     routes::build_router,
     state::AppState,
-    storage::InMemoryVectorStore,
 };
 use serde_json::{Value, json};
-use std::sync::Arc;
 use tower::ServiceExt;
 
+mod common;
+
 fn create_test_state(config: AppConfig) -> AppState {
-    let dimension = config.model.dimension;
-    let embedder = Arc::new(MockEmbedder::new(dimension));
-    let vector_store = Arc::new(InMemoryVectorStore::new(dimension));
-    let mock_llm = Arc::new(MockLlmClient::new());
-    let pipeline = Arc::new(RagPipeline::new(
-        vector_store.clone(),
-        Arc::new(EmbedderTextAdapter(embedder.clone())),
-        mock_llm,
-    ));
-    AppState::new(config, embedder, vector_store, pipeline)
+    common::state_with_llm(config, MockLlmClient::new())
 }
 
 #[tokio::test]

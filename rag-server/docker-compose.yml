@@ -7,6 +7,8 @@ services:
     user: "1000:1000"
     ports:
       - "8080:8080"
+    env_file:
+      - .env
     environment:
       - RAG_SERVER__HOST=0.0.0.0
       - RAG_SERVER__PORT=8080

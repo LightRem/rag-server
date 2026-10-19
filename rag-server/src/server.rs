@@ -1,7 +1,7 @@
 use crate::{
     config::{AppConfig, ModelConfig, ServerConfig},
-    inference::{Embedder, MockEmbedder, OnnxClipEmbedder},
-    rag::{EmbedderTextAdapter, OpenAiCompatibleLlmClient, RagPipeline},
+    inference::{Embedder, OnnxClipEmbedder},
+    rag::{OpenAiCompatibleLlmClient, RagPipeline},
     routes::build_router,
     state::AppState,
     storage::{InMemoryVectorStore, traits::VectorStore},
@@ -9,30 +9,22 @@ use crate::{
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, task::JoinHandle};
 
-fn init_embedder(config: &ModelConfig) -> Arc<dyn Embedder> {
-    match OnnxClipEmbedder::new(
+fn init_embedder(config: &ModelConfig) -> Result<Arc<dyn Embedder>, Box<dyn std::error::Error>> {
+    let onnx = OnnxClipEmbedder::new(
         &config.text_model_path,
         &config.vision_model_path,
         &config.tokenizer_path,
         config.max_concurrency,
         config.dimension,
-    ) {
-        Ok(onnx) => {
-            tracing::info!(
-                dimension = config.dimension,
-                concurrency = config.max_concurrency,
-                "Initialized local ONNX CLIP runtime session pool"
-            );
-            onnx.into_shared()
-        }
-        Err(e) => {
-            tracing::warn!(
-                warning = %e,
-                "ONNX model files not found or could not be loaded. Initializing MockEmbedder fallback"
-            );
-            Arc::new(MockEmbedder::new(config.dimension))
-        }
-    }
+    )?;
+
+    tracing::info!(
+        dimension = config.dimension,
+        concurrency = config.max_concurrency,
+        "Initialized local ONNX CLIP runtime session pool"
+    );
+
+    Ok(onnx.into_shared())
 }
 
 async fn init_vector_store(
@@ -180,7 +172,7 @@ pub async fn run(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         "Server configuration successfully loaded"
     );
 
-    let embedder = init_embedder(&config.model);
+    let embedder = init_embedder(&config.model)?;
     let vector_store = init_vector_store(&config).await?;
     let flush_task = spawn_periodic_flush_task(vector_store.clone(), &config.server);
 
@@ -192,14 +184,15 @@ pub async fn run(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
         )
         .with_timeout(Duration::from_secs(config.llm.timeout_secs)),
     );
+    let vector_store_dyn: Arc<dyn VectorStore> = vector_store.clone();
 
     let pipeline = Arc::new(RagPipeline::new(
-        vector_store.clone(),
-        Arc::new(EmbedderTextAdapter(embedder.clone())),
+        vector_store_dyn.clone(),
+        embedder.clone(),
         llm_client,
     ));
 
-    let state = AppState::new(config.clone(), embedder, vector_store.clone(), pipeline);
+    let state = AppState::new(config.clone(), embedder, vector_store_dyn, pipeline)?;
     let app = build_router(state);
 
     let listener = TcpListener::bind((config.server.host.as_str(), config.server.port)).await?;

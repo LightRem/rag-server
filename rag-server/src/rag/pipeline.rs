@@ -5,9 +5,9 @@ use super::{
     models::{RagQueryRequest, RagQueryResponse},
 };
 use crate::domain::Modality;
-use crate::error::{GenerationError, InferenceError, RagError};
+use crate::error::{GenerationError, RagError};
+use crate::inference::Embedder;
 use crate::storage::{SearchFilter, VectorStore};
-use async_trait::async_trait;
 use std::sync::Arc;
 
 pub const DEFAULT_SYSTEM_PROMPT: &str = concat!(
@@ -21,10 +21,33 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = concat!(
 );
 
 pub const MAX_PROMPT_CHARS: usize = 16_000;
+pub const MAX_TOP_K: usize = 100;
+pub const MAX_TOKENS_LIMIT: usize = 8192;
 const PROMPT_TEMPLATE_OVERHEAD_CHARS: usize = 200;
 
+fn strip_prefix_ignore_case<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    let mut s_chars = s.chars();
+    let mut p_chars = prefix.chars();
+
+    while let Some(p) = p_chars.next() {
+        let s_char = s_chars.next()?;
+        let mut s_lower = s_char.to_lowercase();
+
+        if s_lower.next() != Some(p) {
+            return None;
+        }
+
+        for extra_p in s_lower {
+            if p_chars.next() != Some(extra_p) {
+                return None;
+            }
+        }
+    }
+
+    Some(s_chars.as_str())
+}
+
 fn canonicalize_clip_query(query: &str) -> String {
-    let lower = query.to_lowercase();
     const PREFIXES: &[&str] = &[
         "tell me about ",
         "can you tell me about ",
@@ -40,37 +63,24 @@ fn canonicalize_clip_query(query: &str) -> String {
     ];
 
     for prefix in PREFIXES {
-        if lower.starts_with(prefix) {
-            return query[prefix.len()..].trim().to_string();
+        if let Some(stripped) = strip_prefix_ignore_case(query, prefix) {
+            return stripped.trim().to_string();
         }
     }
+
     query.trim().to_string()
-}
-
-pub struct EmbedderTextAdapter(pub Arc<dyn crate::inference::Embedder>);
-
-#[async_trait]
-pub trait TextEmbedder: Send + Sync {
-    async fn embed_text(&self, text: &str) -> Result<Vec<f32>, InferenceError>;
-}
-
-#[async_trait]
-impl TextEmbedder for EmbedderTextAdapter {
-    async fn embed_text(&self, text: &str) -> Result<Vec<f32>, InferenceError> {
-        self.0.embed_text(text).await
-    }
 }
 
 pub struct RagPipeline {
     store: Arc<dyn VectorStore>,
-    embedder: Arc<dyn TextEmbedder>,
+    embedder: Arc<dyn Embedder>,
     llm: Arc<dyn LlmClient>,
 }
 
 impl RagPipeline {
     pub fn new(
         store: Arc<dyn VectorStore>,
-        embedder: Arc<dyn TextEmbedder>,
+        embedder: Arc<dyn Embedder>,
         llm: Arc<dyn LlmClient>,
     ) -> Self {
         Self {
@@ -86,6 +96,34 @@ impl RagPipeline {
             return Err(RagError::ValidationError(
                 "Search query cannot be empty".into(),
             ));
+        }
+
+        if request.top_k == 0 || request.top_k > MAX_TOP_K {
+            return Err(RagError::ValidationError(format!(
+                "top_k must be between 1 and {MAX_TOP_K}"
+            )));
+        }
+
+        if !request.min_score.is_finite() || !(-1.0..=1.0).contains(&request.min_score) {
+            return Err(RagError::ValidationError(
+                "min_score must be between -1.0 and 1.0".into(),
+            ));
+        }
+
+        if let Some(temp) = request.temperature
+            && (!temp.is_finite() || !(0.0..=2.0).contains(&temp))
+        {
+            return Err(RagError::ValidationError(
+                "temperature must be between 0.0 and 2.0".into(),
+            ));
+        }
+
+        if let Some(tokens) = request.max_tokens
+            && (tokens == 0 || tokens > MAX_TOKENS_LIMIT)
+        {
+            return Err(RagError::ValidationError(format!(
+                "max_tokens must be between 1 and {MAX_TOKENS_LIMIT}"
+            )));
         }
 
         let system_prompt = match &request.system_prompt {
@@ -109,10 +147,9 @@ impl RagPipeline {
             .with_query_text(&search_text)
             .with_query_modality(Modality::Text);
 
-        let retrieval_k = request.top_k.max(7);
         let search_results = self
             .store
-            .search(&query_vector, retrieval_k, Some(filter))
+            .search(&query_vector, request.top_k, Some(filter))
             .await?;
 
         if search_results.is_empty() && !request.allow_empty_context {

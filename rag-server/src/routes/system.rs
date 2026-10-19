@@ -3,12 +3,19 @@ use crate::{domain::ImageSource, error::ApiError, extractors::AppJson, state::Ap
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde_json::json;
 
-pub async fn health_check_handler() -> impl IntoResponse {
+pub async fn health_check_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let (status, embedder) = if state.embedder().is_mock() {
+        ("degraded", "mock")
+    } else {
+        ("healthy", "onnx")
+    };
+
     (
         StatusCode::OK,
         Json(json!({
-            "status": "healthy",
-            "service": "multimodal-rag-server"
+            "status": status,
+            "service": "multimodal-rag-server",
+            "embedder": embedder
         })),
     )
 }
@@ -44,15 +51,13 @@ pub async fn validate_payload_handler(
 
     let allowed_root = state.uploads_dir();
     if let Some(img @ ImageSource::Path(_)) = &payload.image {
-        img.validate_safe_path(allowed_root)
-            .map_err(ApiError::ValidationError)?;
+        img.validate_safe_path(allowed_root)?;
     }
 
     if let Some(ref images) = payload.images {
         for img in images {
             if matches!(img, ImageSource::Path(_)) {
-                img.validate_safe_path(allowed_root)
-                    .map_err(ApiError::ValidationError)?;
+                img.validate_safe_path(allowed_root)?;
             }
         }
     }

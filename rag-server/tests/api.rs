@@ -5,32 +5,22 @@ use axum::{
 use http_body_util::BodyExt;
 use rag_server::{
     config::AppConfig,
-    inference::MockEmbedder,
-    rag::{EmbedderTextAdapter, MockLlmClient, RagPipeline},
+    rag::MockLlmClient,
     routes::{MAX_BATCH_SIZE, build_router},
-    state::AppState,
-    storage::InMemoryVectorStore,
 };
 use serde_json::{Value, json};
-use std::sync::Arc;
 use tower::ServiceExt;
+
+mod common;
 
 fn create_test_app(llm_response: Option<&str>) -> axum::Router {
     let mut config = AppConfig::default();
     config.model.dimension = 4;
-    let embedder = Arc::new(MockEmbedder::new(4));
-    let vector_store = Arc::new(InMemoryVectorStore::new(4));
-    let mock_llm = Arc::new(match llm_response {
+    let llm = match llm_response {
         Some(resp) => MockLlmClient::with_response(resp),
         None => MockLlmClient::new(),
-    });
-    let pipeline = Arc::new(RagPipeline::new(
-        vector_store.clone(),
-        Arc::new(EmbedderTextAdapter(embedder.clone())),
-        mock_llm,
-    ));
-    let state = AppState::new(config, embedder, vector_store, pipeline);
-    build_router(state)
+    };
+    build_router(common::state_with_llm(config, llm))
 }
 
 #[tokio::test]
@@ -44,7 +34,8 @@ async fn test_api_stats_and_health() {
     assert_eq!(res.status(), StatusCode::OK);
     let body = res.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["status"], "healthy");
+    assert_eq!(json["status"], "degraded");
+    assert_eq!(json["embedder"], "mock");
     let stats_req = Request::builder()
         .uri("/api/v1/stats")
         .body(Body::empty())
@@ -107,13 +98,7 @@ async fn test_api_multimodal_indexing_and_rag_fusion() {
     let visuals = json["visuals"].as_array().unwrap();
     assert_eq!(visuals.len(), 1);
     assert_eq!(visuals[0]["id"], "doc_multimodal_1");
-
-    let visual_url = visuals[0]["url"].as_str().unwrap();
-    assert!(
-        visual_url == "/uploads/doc_multimodal_1.png"
-            || visual_url == "embedded://image/doc_multimodal_1",
-        "Unexpected visual URL: {visual_url}"
-    );
+    assert_eq!(visuals[0]["url"], "/uploads/doc_multimodal_1.png");
 }
 
 #[tokio::test]

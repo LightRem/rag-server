@@ -213,18 +213,79 @@ impl HnswIndex {
         let num_layers = self.nodes[slot_idx].layers.len();
         for l in 0..num_layers {
             let outgoing = std::mem::take(&mut self.nodes[slot_idx].layers[l]);
-            for nb in outgoing {
+            for &nb in &outgoing {
                 if nb < self.nodes.len() && l < self.nodes[nb].in_layers.len() {
                     self.nodes[nb].in_layers[l].retain(|&x| x != slot_idx);
                 }
             }
             let incoming = std::mem::take(&mut self.nodes[slot_idx].in_layers[l]);
-            for nb in incoming {
+            for &nb in &incoming {
                 if nb < self.nodes.len() && l < self.nodes[nb].layers.len() {
                     self.nodes[nb].layers[l].retain(|&x| x != slot_idx);
                 }
             }
+
+            let max_edges = if l == 0 {
+                self.config.m0
+            } else {
+                self.config.m
+            };
+
+            for &src in &incoming {
+                if src >= self.nodes.len() || l >= self.nodes[src].layers.len() || src == slot_idx {
+                    continue;
+                }
+                for &dst in &outgoing {
+                    if dst >= self.nodes.len()
+                        || l >= self.nodes[dst].layers.len()
+                        || dst == slot_idx
+                        || dst == src
+                    {
+                        continue;
+                    }
+                    if !self.nodes[src].layers[l].contains(&dst)
+                        && self.nodes[src].layers[l].len() < max_edges
+                    {
+                        self.nodes[src].layers[l].push(dst);
+                        if !self.nodes[dst].in_layers[l].contains(&src) {
+                            self.nodes[dst].in_layers[l].push(src);
+                        }
+                    }
+                }
+            }
+
+            let mut all_neighbors = incoming;
+            all_neighbors.extend(outgoing);
+            all_neighbors.retain(|&nb| nb != slot_idx && nb < self.nodes.len());
+            all_neighbors.sort_unstable();
+            all_neighbors.dedup();
+
+            for (i, &u) in all_neighbors.iter().enumerate() {
+                if l >= self.nodes[u].layers.len() || self.nodes[u].layers[l].len() >= max_edges {
+                    continue;
+                }
+                for (j, &v) in all_neighbors.iter().enumerate() {
+                    if i == j {
+                        continue;
+                    }
+                    if l >= self.nodes[v].layers.len() {
+                        continue;
+                    }
+                    if !self.nodes[u].layers[l].contains(&v)
+                        && self.nodes[u].layers[l].len() < max_edges
+                    {
+                        self.nodes[u].layers[l].push(v);
+                        if !self.nodes[v].in_layers[l].contains(&u) {
+                            self.nodes[v].in_layers[l].push(u);
+                        }
+                    }
+                    if self.nodes[u].layers[l].len() >= max_edges {
+                        break;
+                    }
+                }
+            }
         }
+
         if self.entry_point == Some(slot_idx) {
             let mut best_entry = None;
             let mut best_layer = 0;
@@ -481,8 +542,11 @@ impl HnswIndex {
         let target_mod = filter.and_then(|f| f.modality.as_ref());
         let total_nodes = self.nodes.len();
         let matches_filter = |slot: usize, score: f32| -> bool {
-            if target_mod.is_some_and(|m| &view.modalities[slot] != m) {
-                return false;
+            if let Some(m) = target_mod {
+                let doc_mod = &view.modalities[slot];
+                if doc_mod != m && *doc_mod != Modality::Multimodal {
+                    return false;
+                }
             }
             if min_score.is_some_and(|min| score < min) {
                 return false;

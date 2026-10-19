@@ -9,6 +9,7 @@ pub mod system;
 use crate::state::AppState;
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
     response::Html,
     routing::{delete, get, post},
 };
@@ -46,6 +47,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/documents/:id",
             delete(documents::delete_document_handler),
         )
+        .layer(DefaultBodyLimit::max(max_body_bytes))
         .layer(RequestBodyLimitLayer::new(max_body_bytes))
         .layer(TraceLayer::new_for_http())
         .with_state(state)

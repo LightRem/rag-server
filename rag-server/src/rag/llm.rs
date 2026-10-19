@@ -46,7 +46,7 @@ impl OpenAiCompatibleLlmClient {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
             .build()
-            .expect("Failed to build HTTP client for LLM");
+            .unwrap_or_else(|_| reqwest::Client::new());
 
         Self {
             endpoint: normalized_endpoint,
@@ -58,21 +58,22 @@ impl OpenAiCompatibleLlmClient {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_temperature(mut self, temperature: f32) -> Self {
         self.temperature = temperature;
         self
     }
 
+    #[allow(dead_code)]
     pub fn with_max_tokens(mut self, max_tokens: usize) -> Self {
         self.max_tokens = max_tokens;
         self
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.client = reqwest::Client::builder()
-            .timeout(timeout)
-            .build()
-            .expect("Failed to build HTTP client for LLM with custom timeout");
+        if let Ok(client) = reqwest::Client::builder().timeout(timeout).build() {
+            self.client = client;
+        }
         self
     }
 }
@@ -172,10 +173,12 @@ impl LlmClient for OpenAiCompatibleLlmClient {
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 pub struct MockLlmClient {
     fixed_response: Option<String>,
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl MockLlmClient {
     pub fn new() -> Self {
         Self {
@@ -190,12 +193,14 @@ impl MockLlmClient {
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl Default for MockLlmClient {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 #[async_trait]
 impl LlmClient for MockLlmClient {
     async fn generate(

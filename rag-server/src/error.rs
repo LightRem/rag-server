@@ -1,3 +1,4 @@
+use crate::domain::DomainError;
 use axum::{
     Json,
     http::StatusCode,
@@ -47,9 +48,6 @@ pub enum InferenceError {
 
 #[derive(Error, Debug)]
 pub enum StorageError {
-    #[error("Document with id '{id}' not found")]
-    DocumentNotFound { id: String },
-
     #[error("Vector dimension mismatch: store expects {expected}, vector is {actual}")]
     DimensionMismatch { expected: usize, actual: usize },
 
@@ -58,9 +56,6 @@ pub enum StorageError {
 
     #[error("Invalid search filter: {0}")]
     InvalidFilter(String),
-
-    #[error("Document conflict: {0}")]
-    Conflict(String),
 
     #[error("Storage capacity exceeded: current {current}, max allowed {max}")]
     CapacityExceeded { current: usize, max: usize },
@@ -117,6 +112,9 @@ pub enum ApiError {
     Config(#[from] ConfigError),
 
     #[error(transparent)]
+    Domain(#[from] DomainError),
+
+    #[error(transparent)]
     Inference(#[from] InferenceError),
 
     #[error(transparent)]
@@ -134,17 +132,11 @@ pub enum ApiError {
     #[error("Payload size {size} exceeds allowed limit of {max_allowed} bytes")]
     PayloadTooLarge { size: usize, max_allowed: usize },
 
-    #[error("Requested resource not found: {0}")]
-    NotFound(String),
+    #[error("Payload limit exceeded: {0}")]
+    PayloadLimitExceeded(String),
 
-    #[error("Resource state conflict: {0}")]
-    Conflict(String),
-
-    #[error("Rate limit or concurrency quota exceeded: {0}")]
-    TooManyRequests(String),
-
-    #[error("Service temporarily unavailable: {0}")]
-    ServiceUnavailable(String),
+    #[error("Unsupported media type: {0}")]
+    UnsupportedMediaType(String),
 }
 
 impl IntoResponse for ApiError {
@@ -157,17 +149,20 @@ impl IntoResponse for ApiError {
                 RagError::Generation(e) => return ApiError::Generation(e).into_response(),
             },
 
+            ApiError::Domain(DomainError::InvalidAllowedRoot { path, source }) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Invalid allowed root '{path:?}': {source}"),
+            ),
+            ApiError::Domain(e) => (StatusCode::BAD_REQUEST, e.to_string()),
+
             ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
             ApiError::ValidationError(msg) => (StatusCode::BAD_REQUEST, msg),
             ApiError::PayloadTooLarge { size, max_allowed } => (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 format!("Payload size {size} bytes exceeds limit of {max_allowed} bytes"),
             ),
-
-            ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg),
-            ApiError::TooManyRequests(msg) => (StatusCode::TOO_MANY_REQUESTS, msg),
-            ApiError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg),
+            ApiError::PayloadLimitExceeded(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg),
+            ApiError::UnsupportedMediaType(msg) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, msg),
 
             ApiError::Inference(InferenceError::Preprocessing(reason)) => (
                 StatusCode::BAD_REQUEST,
@@ -180,8 +175,8 @@ impl IntoResponse for ApiError {
             ),
 
             ApiError::Inference(InferenceError::TensorShapeMismatch { .. }) => (
-                StatusCode::BAD_REQUEST,
-                "Input dimensions are invalid".to_string(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal model inference failure: tensor shape mismatch".to_string(),
             ),
 
             ApiError::Inference(InferenceError::Timeout(reason)) => (
@@ -204,17 +199,9 @@ impl IntoResponse for ApiError {
             ),
 
             ApiError::Storage(StorageError::Serialization(reason)) => (
-                StatusCode::BAD_REQUEST,
+                StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Document serialization failed: {reason}"),
             ),
-
-            ApiError::Storage(StorageError::DocumentNotFound { id }) => {
-                (StatusCode::NOT_FOUND, format!("Document '{id}' not found"))
-            }
-
-            ApiError::Storage(StorageError::Conflict(reason)) => {
-                (StatusCode::CONFLICT, format!("Storage conflict: {reason}"))
-            }
 
             ApiError::Storage(StorageError::CapacityExceeded { current, max }) => (
                 StatusCode::INSUFFICIENT_STORAGE,

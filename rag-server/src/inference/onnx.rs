@@ -49,6 +49,7 @@ impl OnnxClipEmbedder {
                 path: text_model_path.to_path_buf(),
             });
         }
+
         if !vision_model_path.exists() {
             return Err(InferenceError::ModelNotFound {
                 path: vision_model_path.to_path_buf(),
@@ -112,6 +113,7 @@ fn extract_and_normalize_embeddings(
 
     for (idx, (name, tensor)) in outputs_vec.iter().enumerate() {
         let name_str: &str = name;
+
         if let Ok((shape, _)) = tensor.try_extract_tensor::<f32>() {
             let shape_ref: &[i64] = shape.as_ref();
             let matches_shape = (shape_ref.len() == 2
@@ -178,13 +180,14 @@ impl Embedder for OnnxClipEmbedder {
     }
 
     async fn embed_text_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
-        let mut input_tensor = TextPreprocessor::preprocess_batch(&self.tokenizer, texts)?;
+        let input_tensor = TextPreprocessor::preprocess_batch(&self.tokenizer, texts)?;
         let permit = self.text_pool.acquire_permit().await?;
         let pool = self.text_pool.clone();
         let expected_dim = self.dimension;
         let expected_count = texts.len();
 
         tokio::task::spawn_blocking(move || {
+            let mut input_tensor = input_tensor;
             let session = pool.pop_session()?;
             let mut guard = SessionGuard::new(pool, session, permit);
 
@@ -193,14 +196,10 @@ impl Embedder for OnnxClipEmbedder {
                 InferenceError::Execution("Text tensor buffer is not contiguous".into())
             })?;
 
-            // Если при усечении токен конца предложения (<|endoftext|>) был отсечен,
-            // восстанавливаем его на последней позиции окна (76), чтобы CLIP пулил семантику
-            let eot_id = CLIP_EOT_TOKEN_ID as _;
+            let eot_id: i64 = CLIP_EOT_TOKEN_ID;
             for chunk in slice.chunks_exact_mut(CLIP_TEXT_SEQ_LEN) {
-                if !chunk.contains(&eot_id)
-                    && let Some(last) = chunk.last_mut()
-                {
-                    *last = eot_id;
+                if !chunk.contains(&eot_id) {
+                    chunk[CLIP_TEXT_SEQ_LEN - 1] = eot_id;
                 }
             }
 
@@ -242,11 +241,11 @@ impl Embedder for OnnxClipEmbedder {
         let owned_images: Vec<Bytes> = images.to_vec();
 
         tokio::task::spawn_blocking(move || {
-            let session = pool.pop_session()?;
-            let mut guard = SessionGuard::new(pool, session, permit);
-
             let image_slices: Vec<&[u8]> = owned_images.iter().map(|b| b.as_ref()).collect();
             let input_tensor = ImagePreprocessor::preprocess_batch(&image_slices)?;
+
+            let session = pool.pop_session()?;
+            let mut guard = SessionGuard::new(pool, session, permit);
 
             let shape = [expected_count, 3, CLIP_IMAGE_SIZE, CLIP_IMAGE_SIZE];
             let slice = input_tensor.as_slice().ok_or_else(|| {

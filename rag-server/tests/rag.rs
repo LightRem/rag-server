@@ -1,17 +1,22 @@
 use async_trait::async_trait;
+use bytes::Bytes;
 use rag_server::{
     domain::Modality,
     error::{GenerationError, InferenceError, RagError},
-    rag::{MAX_PROMPT_CHARS, MockLlmClient, RagPipeline, RagQueryRequest, TextEmbedder},
+    inference::Embedder,
+    rag::{MAX_PROMPT_CHARS, MockLlmClient, RagPipeline, RagQueryRequest},
     storage::{InMemoryVectorStore, VectorPoint, VectorStore},
 };
 use serde_json::json;
 use std::sync::Arc;
 
 struct MockTextEmbedder;
-
 #[async_trait]
-impl TextEmbedder for MockTextEmbedder {
+impl Embedder for MockTextEmbedder {
+    fn dimension(&self) -> usize {
+        4
+    }
+
     async fn embed_text(&self, text: &str) -> Result<Vec<f32>, InferenceError> {
         let mut vec = vec![0.0f32; 4];
         if text.contains("car") || text.contains("Ferrari") || text.contains("авто") {
@@ -20,6 +25,22 @@ impl TextEmbedder for MockTextEmbedder {
             vec[1] = 1.0;
         }
         Ok(vec)
+    }
+
+    async fn embed_image(&self, _image: &[u8]) -> Result<Vec<f32>, InferenceError> {
+        Ok(vec![0.0; 4])
+    }
+
+    async fn embed_text_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
+        let mut res = Vec::with_capacity(texts.len());
+        for t in texts {
+            res.push(self.embed_text(t).await?);
+        }
+        Ok(res)
+    }
+
+    async fn embed_image_batch(&self, images: &[Bytes]) -> Result<Vec<Vec<f32>>, InferenceError> {
+        Ok(vec![vec![0.0; 4]; images.len()])
     }
 }
 
@@ -72,6 +93,7 @@ async fn test_multimodal_rag_end_to_end_pipeline() {
     let pipeline = RagPipeline::new(store, embedder, mock_llm);
     let request = RagQueryRequest {
         query: "What is the top speed of the Ferrari car?".to_string(),
+        image: None,
         top_k: 2,
         min_score: 0.5,
         system_prompt: None,
@@ -125,6 +147,7 @@ async fn test_grouped_and_unspaced_citations() {
     let pipeline = RagPipeline::new(store, embedder, mock_llm);
     let request = RagQueryRequest {
         query: "Ferrari car facts".to_string(),
+        image: None,
         top_k: 5,
         min_score: 0.5,
         system_prompt: None,
@@ -158,6 +181,7 @@ async fn test_numeric_footnote_disambiguation() {
     let pipeline = RagPipeline::new(store.clone(), embedder.clone(), mock_llm);
     let req_uncited = RagQueryRequest {
         query: "Ferrari car info".to_string(),
+        image: None,
         top_k: 2,
         min_score: 0.5,
         system_prompt: None,
@@ -175,6 +199,7 @@ async fn test_numeric_footnote_disambiguation() {
     let resp_explicit = pipeline_explicit
         .answer(RagQueryRequest {
             query: "Ferrari car info".to_string(),
+            image: None,
             top_k: 2,
             min_score: 0.5,
             system_prompt: None,
@@ -208,6 +233,7 @@ async fn test_context_budgeting_does_not_crash_on_large_search_results() {
     let pipeline = RagPipeline::new(store, embedder, mock_llm);
     let request = RagQueryRequest {
         query: "Ferrari car large query".to_string(),
+        image: None,
         top_k: 12,
         min_score: 0.5,
         system_prompt: None,
@@ -243,6 +269,7 @@ async fn test_custom_system_prompt_preserves_citation_instructions() {
     let pipeline = RagPipeline::new(store, embedder, mock_llm);
     let request = RagQueryRequest {
         query: "Ferrari car info".to_string(),
+        image: None,
         top_k: 2,
         min_score: 0.5,
         system_prompt: Some("Відповідай коротко українською мовою.".to_string()),
@@ -282,6 +309,7 @@ async fn test_multimodal_document_extracts_both_text_and_image() {
     let pipeline = RagPipeline::new(store, embedder, mock_llm);
     let request = RagQueryRequest {
         query: "Ferrari car info".to_string(),
+        image: None,
         top_k: 2,
         min_score: 0.5,
         system_prompt: None,
@@ -315,6 +343,7 @@ async fn test_cyrillic_unicode_prompt_length_accepted() {
     assert!(cyrillic_prompt.chars().count() < MAX_PROMPT_CHARS);
     let request = RagQueryRequest {
         query: "авто".to_string(),
+        image: None,
         top_k: 5,
         min_score: 0.1,
         system_prompt: Some(cyrillic_prompt),
@@ -356,6 +385,7 @@ async fn test_filter_uncited_sources() {
     let pipeline = RagPipeline::new(store, embedder, mock_llm);
     let request = RagQueryRequest {
         query: "Ferrari car info".to_string(),
+        image: None,
         top_k: 5,
         min_score: 0.5,
         system_prompt: None,
@@ -378,6 +408,7 @@ async fn test_rag_pipeline_empty_context_early_return() {
     let pipeline = RagPipeline::new(store, embedder, mock_llm);
     let request = RagQueryRequest {
         query: "Unknown topic".to_string(),
+        image: None,
         top_k: 5,
         min_score: 0.9,
         system_prompt: None,
@@ -402,6 +433,7 @@ async fn test_rag_pipeline_prompt_too_long() {
     let huge_prompt = "x".repeat(MAX_PROMPT_CHARS + 100);
     let request = RagQueryRequest {
         query: "car".to_string(),
+        image: None,
         top_k: 5,
         min_score: 0.1,
         system_prompt: Some(huge_prompt),
@@ -426,6 +458,7 @@ async fn test_rag_pipeline_rejects_empty_query() {
     let pipeline = RagPipeline::new(store, embedder, mock_llm);
     let request = RagQueryRequest {
         query: "   ".to_string(),
+        image: None,
         top_k: 5,
         min_score: 0.2,
         system_prompt: None,

@@ -6,30 +6,21 @@ use http_body_util::BodyExt;
 use rag_server::{
     config::{AppConfig, ServerConfig},
     domain::ImageSource,
-    inference::MockEmbedder,
-    rag::{EmbedderTextAdapter, MockLlmClient, RagPipeline},
+    rag::MockLlmClient,
     routes::build_router,
     state::AppState,
-    storage::InMemoryVectorStore,
     telemetry::init_telemetry,
 };
 use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tower::ServiceExt;
 
+mod common;
+
 fn create_test_state(config: AppConfig) -> AppState {
-    let embedder = Arc::new(MockEmbedder::new(config.model.dimension));
-    let vector_store = Arc::new(InMemoryVectorStore::new(config.model.dimension));
-    let mock_llm = Arc::new(MockLlmClient::new());
-    let pipeline = Arc::new(RagPipeline::new(
-        vector_store.clone(),
-        Arc::new(EmbedderTextAdapter(embedder.clone())),
-        mock_llm,
-    ));
-    AppState::new(config, embedder, vector_store, pipeline)
+    common::state_with_llm(config, MockLlmClient::new())
 }
 
 #[tokio::test]
@@ -50,7 +41,8 @@ async fn test_health_check_end_to_end() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["status"], "healthy");
+    assert_eq!(json["status"], "degraded");
+    assert_eq!(json["embedder"], "mock");
     assert_eq!(json["service"], "multimodal-rag-server");
 }
 

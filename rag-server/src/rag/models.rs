@@ -1,7 +1,11 @@
+use crate::domain::ImageSource;
 use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RagQueryRequest {
     pub query: String,
+    #[serde(default)]
+    pub image: Option<ImageSource>,
     #[serde(default = "default_top_k")]
     pub top_k: usize,
     #[serde(default = "default_min_score")]

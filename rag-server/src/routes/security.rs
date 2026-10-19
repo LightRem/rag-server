@@ -21,7 +21,7 @@ pub fn is_forbidden_ip(ip: IpAddr) -> bool {
                 || (octets[0] == 169 && octets[1] == 254)
                 || (octets[0] == 172 && (16..=31).contains(&octets[1]))
                 || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
-                || (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
+                || (octets[0] == 192 && octets[0] == 0 && octets[2] == 2)
                 || (octets[0] == 192 && octets[1] == 168)
                 || (octets[0] == 198 && (18..=19).contains(&octets[1]))
                 || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
@@ -45,6 +45,34 @@ pub fn is_forbidden_ip(ip: IpAddr) -> bool {
                 );
                 return is_forbidden_ip(IpAddr::V4(mapped_ipv4));
             }
+
+            // NAT64 Well-Known Prefix (64:ff9b::/96)
+            if segs[0] == 0x0040
+                && segs[1] == 0xff9b
+                && segs[2] == 0
+                && segs[3] == 0
+                && segs[4] == 0
+            {
+                let mapped_ipv4 = std::net::Ipv4Addr::new(
+                    (segs[6] >> 8) as u8,
+                    (segs[6] & 0xff) as u8,
+                    (segs[7] >> 8) as u8,
+                    (segs[7] & 0xff) as u8,
+                );
+                return is_forbidden_ip(IpAddr::V4(mapped_ipv4));
+            }
+
+            // 6to4 tunneling prefix (2002::/16)
+            if segs[0] == 0x2002 {
+                let mapped_ipv4 = std::net::Ipv4Addr::new(
+                    (segs[1] >> 8) as u8,
+                    (segs[1] & 0xff) as u8,
+                    (segs[2] >> 8) as u8,
+                    (segs[2] & 0xff) as u8,
+                );
+                return is_forbidden_ip(IpAddr::V4(mapped_ipv4));
+            }
+
             ipv6.is_loopback()
                 || ipv6.is_unspecified()
                 || (segs[0] & 0xfe00) == 0xfc00

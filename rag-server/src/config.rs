@@ -13,6 +13,7 @@ pub struct ServerConfig {
     pub max_body_limit_mb: usize,
     pub snapshot_path: PathBuf,
     pub snapshot_interval_secs: u64,
+    pub uploads_dir: PathBuf,
 }
 
 impl ServerConfig {
@@ -29,6 +30,7 @@ impl Default for ServerConfig {
             max_body_limit_mb: 32,
             snapshot_path: PathBuf::from("data/vector_store.json"),
             snapshot_interval_secs: 300,
+            uploads_dir: PathBuf::from("uploads"),
         }
     }
 }
@@ -86,6 +88,8 @@ pub struct LoggingConfig {
     pub level: String,
     pub format: LogFormat,
     pub file_path: Option<PathBuf>,
+    pub max_file_size_mb: u64,
+    pub max_files: usize,
 }
 
 impl Default for LoggingConfig {
@@ -94,6 +98,8 @@ impl Default for LoggingConfig {
             level: "info".to_string(),
             format: LogFormat::Pretty,
             file_path: Some(PathBuf::from("data/server.log")),
+            max_file_size_mb: 10,
+            max_files: 5,
         }
     }
 }
@@ -129,6 +135,13 @@ impl AppConfig {
             });
         }
 
+        if self.server.uploads_dir.as_os_str().is_empty() {
+            return Err(ConfigError::InvalidParameter {
+                field: "server.uploads_dir",
+                reason: "Uploads directory cannot be empty".to_string(),
+            });
+        }
+
         if self.model.max_concurrency == 0 {
             return Err(ConfigError::InvalidParameter {
                 field: "model.max_concurrency",
@@ -154,6 +167,20 @@ impl AppConfig {
             return Err(ConfigError::InvalidParameter {
                 field: "llm.timeout_secs",
                 reason: "LLM timeout must be greater than 0 seconds".to_string(),
+            });
+        }
+
+        if self.logging.max_file_size_mb == 0 {
+            return Err(ConfigError::InvalidParameter {
+                field: "logging.max_file_size_mb",
+                reason: "Maximum log file size must be greater than 0 MB".to_string(),
+            });
+        }
+
+        if self.logging.max_files == 0 {
+            return Err(ConfigError::InvalidParameter {
+                field: "logging.max_files",
+                reason: "At least one rotated log file must be kept".to_string(),
             });
         }
 

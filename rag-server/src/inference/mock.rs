@@ -60,7 +60,12 @@ impl Embedder for MockEmbedder {
             })
             .collect())
     }
+
     fn dimension(&self) -> usize {
         self.dimension
+    }
+
+    fn is_mock(&self) -> bool {
+        true
     }
 }

@@ -2,36 +2,15 @@ use axum::{
     body::Body,
     http::{Request, StatusCode, header},
 };
-
 use http_body_util::BodyExt;
-use rag_server::{
-    config::AppConfig,
-    inference::MockEmbedder,
-    rag::{EmbedderTextAdapter, OpenAiCompatibleLlmClient, RagPipeline},
-    routes::build_router,
-    state::AppState,
-    storage::InMemoryVectorStore,
-};
-
-use std::sync::Arc;
-use std::time::Duration;
+use rag_server::{config::AppConfig, rag::MockLlmClient, routes::build_router};
 use tower::ServiceExt;
+
+mod common;
 
 fn create_test_app() -> axum::Router {
     let config = AppConfig::default();
-    let embedder = Arc::new(MockEmbedder::new(config.model.dimension));
-    let vector_store = Arc::new(InMemoryVectorStore::new(config.model.dimension));
-    let llm_client = Arc::new(
-        OpenAiCompatibleLlmClient::new(&config.llm.endpoint, &config.llm.model, None)
-            .with_timeout(Duration::from_secs(5)),
-    );
-    let pipeline = Arc::new(RagPipeline::new(
-        vector_store.clone(),
-        Arc::new(EmbedderTextAdapter(embedder.clone())),
-        llm_client,
-    ));
-    let state = AppState::new(config, embedder, vector_store, pipeline);
-    build_router(state)
+    build_router(common::state_with_llm(config, MockLlmClient::new()))
 }
 
 #[tokio::test]

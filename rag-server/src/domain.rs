@@ -3,12 +3,53 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::path::{Component, Path, PathBuf};
+use thiserror::Error;
 
 pub type DocumentId = String;
 
 const MAX_BASE64_STRING_LEN: usize = 32 * 1024 * 1024;
 pub const SUPPORTED_IMAGE_MIME_TYPES: &[&str] =
     &["image/jpeg", "image/png", "image/webp", "image/gif"];
+
+#[derive(Error, Debug)]
+pub enum DomainError {
+    #[error("Unsupported MIME type '{0}'. Permitted formats: {SUPPORTED_IMAGE_MIME_TYPES:?}")]
+    UnsupportedMimeType(String),
+
+    #[error("Base64 payload length {length} exceeds maximum allowed limit of {max} bytes")]
+    Base64TooLong { length: usize, max: usize },
+
+    #[error("Failed to decode base64 payload: {0}")]
+    Base64Decode(#[from] base64::DecodeError),
+
+    #[error("Path cannot be empty")]
+    EmptyPath,
+
+    #[error("Absolute paths are not permitted: '{0:?}'")]
+    AbsolutePath(PathBuf),
+
+    #[error("Path traversal detected: forbidden '..' in '{0:?}'")]
+    PathTraversal(PathBuf),
+
+    #[error("Root directories or drive prefixes are forbidden: '{0:?}'")]
+    ForbiddenPrefix(PathBuf),
+
+    #[error("Invalid allowed root '{path:?}': {source}")]
+    InvalidAllowedRoot {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("Path '{path:?}' escapes allowed root '{root:?}'")]
+    PathEscapesRoot { path: PathBuf, root: PathBuf },
+
+    #[error("Parent directory of '{path:?}' escapes allowed root '{root:?}'")]
+    ParentEscapesRoot { path: PathBuf, root: PathBuf },
+
+    #[error("ImageSource is not a local file path")]
+    NotALocalPath,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Modality {
@@ -24,12 +65,10 @@ pub struct RawImageData {
 }
 
 impl RawImageData {
-    pub fn new(bytes: Bytes, mime_type: impl Into<String>) -> Result<Self, String> {
+    pub fn new(bytes: Bytes, mime_type: impl Into<String>) -> Result<Self, DomainError> {
         let mime = mime_type.into();
         if !SUPPORTED_IMAGE_MIME_TYPES.contains(&mime.as_str()) {
-            return Err(format!(
-                "Unsupported MIME type '{mime}'. Allowed: {SUPPORTED_IMAGE_MIME_TYPES:?}"
-            ));
+            return Err(DomainError::UnsupportedMimeType(mime));
         }
         Ok(Self {
             bytes,
@@ -64,18 +103,16 @@ impl<'de> Deserialize<'de> for RawImageData {
 
         let helper = RawHelper::deserialize(deserializer)?;
         if !SUPPORTED_IMAGE_MIME_TYPES.contains(&helper.mime_type.as_str()) {
-            return Err(serde::de::Error::custom(format!(
-                "Unsupported MIME type '{}'. Permitted formats: {:?}",
-                helper.mime_type, SUPPORTED_IMAGE_MIME_TYPES
+            return Err(serde::de::Error::custom(DomainError::UnsupportedMimeType(
+                helper.mime_type,
             )));
         }
 
         if helper.base64.len() > MAX_BASE64_STRING_LEN {
-            return Err(serde::de::Error::custom(format!(
-                "Base64 payload length {} exceeds maximum allowed limit of {} bytes",
-                helper.base64.len(),
-                MAX_BASE64_STRING_LEN
-            )));
+            return Err(serde::de::Error::custom(DomainError::Base64TooLong {
+                length: helper.base64.len(),
+                max: MAX_BASE64_STRING_LEN,
+            }));
         }
 
         let decoded = BASE64
@@ -89,40 +126,41 @@ impl<'de> Deserialize<'de> for RawImageData {
     }
 }
 
-fn validate_relative_path(path: &Path, allowed_root: &Path) -> Result<PathBuf, String> {
+fn validate_relative_path(path: &Path, allowed_root: &Path) -> Result<PathBuf, DomainError> {
     if path.as_os_str().is_empty() {
-        return Err("Path cannot be empty".to_string());
+        return Err(DomainError::EmptyPath);
     }
     if path.is_absolute() {
-        return Err(format!("Absolute paths are not permitted: '{path:?}'"));
+        return Err(DomainError::AbsolutePath(path.to_path_buf()));
     }
 
     for comp in path.components() {
         match comp {
             Component::ParentDir => {
-                return Err(format!(
-                    "Path traversal detected: forbidden '..' in '{path:?}'"
-                ));
+                return Err(DomainError::PathTraversal(path.to_path_buf()));
             }
             Component::RootDir | Component::Prefix(_) => {
-                return Err(format!(
-                    "Root directories or drive prefixes are forbidden: '{path:?}'"
-                ));
+                return Err(DomainError::ForbiddenPrefix(path.to_path_buf()));
             }
             Component::Normal(_) | Component::CurDir => {}
         }
     }
 
-    let canonical_root = allowed_root
-        .canonicalize()
-        .map_err(|e| format!("Invalid allowed root '{allowed_root:?}': {e}"))?;
+    let canonical_root =
+        allowed_root
+            .canonicalize()
+            .map_err(|source| DomainError::InvalidAllowedRoot {
+                path: allowed_root.to_path_buf(),
+                source,
+            })?;
 
     let target = canonical_root.join(path);
     if let Ok(canonical_target) = target.canonicalize() {
         if !canonical_target.starts_with(&canonical_root) {
-            return Err(format!(
-                "Path '{path:?}' escapes allowed root '{canonical_root:?}'"
-            ));
+            return Err(DomainError::PathEscapesRoot {
+                path: path.to_path_buf(),
+                root: canonical_root,
+            });
         }
         return Ok(canonical_target);
     }
@@ -131,9 +169,10 @@ fn validate_relative_path(path: &Path, allowed_root: &Path) -> Result<PathBuf, S
     while let Some(parent) = current.parent() {
         if let Ok(canonical_parent) = parent.canonicalize() {
             if !canonical_parent.starts_with(&canonical_root) {
-                return Err(format!(
-                    "Parent directory of '{path:?}' escapes allowed root '{canonical_root:?}'"
-                ));
+                return Err(DomainError::ParentEscapesRoot {
+                    path: path.to_path_buf(),
+                    root: canonical_root,
+                });
             }
             break;
         }
@@ -152,10 +191,10 @@ pub enum ImageSource {
 }
 
 impl ImageSource {
-    pub fn validate_safe_path(&self, allowed_root: &Path) -> Result<PathBuf, String> {
+    pub fn validate_safe_path(&self, allowed_root: &Path) -> Result<PathBuf, DomainError> {
         match self {
             ImageSource::Path(path) => validate_relative_path(path, allowed_root),
-            _ => Err("ImageSource is not a local file path".to_string()),
+            _ => Err(DomainError::NotALocalPath),
         }
     }
 }
@@ -181,7 +220,10 @@ impl MultimodalPayload {
         }
     }
 
-    pub fn new_image_bytes(bytes: Bytes, mime_type: impl Into<String>) -> Result<Self, String> {
+    pub fn new_image_bytes(
+        bytes: Bytes,
+        mime_type: impl Into<String>,
+    ) -> Result<Self, DomainError> {
         let raw = RawImageData::new(bytes, mime_type)?;
         Ok(Self {
             text: None,
