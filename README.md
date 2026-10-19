@@ -1,5 +1,7 @@
 # Multimodal RAG Server in Rust
 
+Rust 1.88+ (edition 2024)
+
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
 [![Axum](https://img.shields.io/badge/framework-axum-blue.svg)](https://github.com/tokio-rs/axum)
 [![Inference](https://img.shields.io/badge/inference-ONNX%20Runtime-green.svg)](https://onnxruntime.ai)
