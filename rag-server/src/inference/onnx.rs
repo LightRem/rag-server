@@ -100,12 +100,12 @@ impl OnnxClipEmbedder {
     }
 }
 
-fn extract_and_normalize_embeddings(
+fn extract_raw_embeddings(
     outputs: SessionOutputs<'_>,
     priority_names: &[&str],
     expected_count: usize,
     expected_dim: usize,
-) -> Result<Vec<Vec<f32>>, InferenceError> {
+) -> Result<Vec<f32>, InferenceError> {
     let outputs_vec: Vec<_> = outputs.into_iter().collect();
     let mut best_priority_idx = usize::MAX;
     let mut best_match_idx = None;
@@ -161,6 +161,10 @@ fn extract_and_normalize_embeddings(
         });
     }
 
+    Ok(data.to_vec())
+}
+
+fn normalize_rows(data: Vec<f32>, expected_dim: usize) -> Result<Vec<Vec<f32>>, InferenceError> {
     data.chunks_exact(expected_dim)
         .map(|chunk| {
             let mut vec = chunk.to_vec();
@@ -211,15 +215,10 @@ impl Embedder for OnnxClipEmbedder {
                 .run(ort::inputs![input_ref])
                 .map_err(|e| InferenceError::Execution(e.to_string()))?;
 
-            let embeddings = extract_and_normalize_embeddings(
-                outputs,
-                TEXT_PRIORITY_NAMES,
-                expected_count,
-                expected_dim,
-            )?;
-
+            let raw =
+                extract_raw_embeddings(outputs, TEXT_PRIORITY_NAMES, expected_count, expected_dim);
             guard.success();
-            Ok(embeddings)
+            normalize_rows(raw?, expected_dim)
         })
         .await
         .map_err(|e| InferenceError::Execution(e.to_string()))?
@@ -259,15 +258,14 @@ impl Embedder for OnnxClipEmbedder {
                 .run(ort::inputs![input_ref])
                 .map_err(|e| InferenceError::Execution(e.to_string()))?;
 
-            let embeddings = extract_and_normalize_embeddings(
+            let raw = extract_raw_embeddings(
                 outputs,
                 VISION_PRIORITY_NAMES,
                 expected_count,
                 expected_dim,
-            )?;
-
+            );
             guard.success();
-            Ok(embeddings)
+            normalize_rows(raw?, expected_dim)
         })
         .await
         .map_err(|e| InferenceError::Execution(e.to_string()))?
