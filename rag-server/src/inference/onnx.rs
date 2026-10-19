@@ -161,12 +161,9 @@ fn extract_raw_embeddings(
         });
     }
 
-    // Copy out while the session is still borrowed by `outputs`.
     Ok(data.to_vec())
 }
 
-/// Splits a flat `[count, dim]` buffer into L2-normalized rows.
-/// Called after the session is back in the pool, so a failure here never reloads the model.
 fn normalize_rows(data: Vec<f32>, expected_dim: usize) -> Result<Vec<Vec<f32>>, InferenceError> {
     data.chunks_exact(expected_dim)
         .map(|chunk| {
@@ -218,8 +215,6 @@ impl Embedder for OnnxClipEmbedder {
                 .run(ort::inputs![input_ref])
                 .map_err(|e| InferenceError::Execution(e.to_string()))?;
 
-            // `run` succeeded, so the session is healthy even if output parsing fails.
-            // Return it to the pool first; only a failed `run` should trigger a model reload.
             let raw =
                 extract_raw_embeddings(outputs, TEXT_PRIORITY_NAMES, expected_count, expected_dim);
             guard.success();
@@ -263,8 +258,6 @@ impl Embedder for OnnxClipEmbedder {
                 .run(ort::inputs![input_ref])
                 .map_err(|e| InferenceError::Execution(e.to_string()))?;
 
-            // `run` succeeded, so the session is healthy even if output parsing fails.
-            // Return it to the pool first; only a failed `run` should trigger a model reload.
             let raw = extract_raw_embeddings(
                 outputs,
                 VISION_PRIORITY_NAMES,
